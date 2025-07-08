@@ -120,9 +120,15 @@ func (rp *RESPParser) parseSingle() (interface{}, error) {
 	return nil, errors.New("invalid input")
 }
 
-func ParseRESP(c net.Conn, input_buf []byte) {
+func ParseRESP(c net.Conn, input_buf []byte) (interface{}, error) {
 	var b []byte
 	var buf *bytes.Buffer = bytes.NewBuffer(b)
 	buf.Write(input_buf)
 
+	rp := &RESPParser{
+		c:   c,
+		buf: buf,
+	}
+
+	return rp.parseSingle()
 }
