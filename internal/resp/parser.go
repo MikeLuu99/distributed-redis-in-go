@@ -80,7 +80,7 @@ func readBulkString(c io.ReadWriter, buf *bytes.Buffer) (string, error) {
 	return string(bulkString), nil
 }
 
-func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (interface{}, error) {
+func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (any, error) {
 	count, err := readLength(buf)
 
 	if err != nil {
@@ -88,7 +88,7 @@ func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (interface{},
 	}
 
 	log.Println("array length: ", count)
-	var elems []interface{} = make([]interface{}, count)
+	var elems []any = make([]any, count)
 	for i := range elems {
 		elem, err := rp.parseSingle()
 		if err != nil {
@@ -100,7 +100,7 @@ func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (interface{},
 	return elems, nil
 }
 
-func (rp *RESPParser) parseSingle() (interface{}, error) {
+func (rp *RESPParser) parseSingle() (any, error) {
 	b, err := rp.buf.ReadByte()
 	if err != nil {
 		return nil, err
@@ -120,7 +120,7 @@ func (rp *RESPParser) parseSingle() (interface{}, error) {
 	return nil, errors.New("invalid input")
 }
 
-func ParseRESP(c net.Conn, input_buf []byte) (interface{}, error) {
+func ParseRESP(c net.Conn, input_buf []byte) (any, error) {
 	var b []byte
 	var buf *bytes.Buffer = bytes.NewBuffer(b)
 	buf.Write(input_buf)

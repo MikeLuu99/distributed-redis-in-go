@@ -9,13 +9,13 @@ import (
 )
 
 func main() {
-	listener, err := net.Listen("tcp", ":4444")
+	listener, err := net.Listen("tcp", ":6380")
 	if err != nil {
 		log.Fatal("error listening:", err)
 	}
 
 	kv := store.NewKeyValueStore()
-	log.Println("Redis server started on :4444")
+	log.Println("Redis server started on :6380")
 
 	for {
 		c, err := listener.Accept()

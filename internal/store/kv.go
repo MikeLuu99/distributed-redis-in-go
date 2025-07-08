@@ -29,9 +29,9 @@ func (kv *KeyValueStore) Get(key string) (string, bool) {
 func (kv *KeyValueStore) Del(key string) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	_, exists := kv.data[key]
-	if exists {
+	if _, exists := kv.data[key]; exists {
 		delete(kv.data, key)
+		return exists
 	}
-	return exists
+	return false
 }
