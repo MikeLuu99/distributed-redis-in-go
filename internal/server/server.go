@@ -1,13 +1,15 @@
-package main
+package server
 
 import (
 	"fmt"
 	"log"
 	"net"
-	"sync"
+
+	"redis-go/internal/resp"
+	"redis-go/internal/store"
 )
 
-func handleConnection(connection net.Conn, kv *KeyValueStore) {
+func HandleConnection(connection net.Conn, kv *store.KeyValueStore) {
 	defer connection.Close()
 	log.Printf("client connected on: %s\n", connection.RemoteAddr().String())
 
@@ -20,7 +22,7 @@ func handleConnection(connection net.Conn, kv *KeyValueStore) {
 			break
 		}
 
-		commands, err := ParseRESP(connection, buffer[:n])
+		commands, err := resp.ParseRESP(connection, buffer[:n])
 		if err != nil {
 			log.Println("error parsing RESP:", err)
 			continue
@@ -30,31 +32,7 @@ func handleConnection(connection net.Conn, kv *KeyValueStore) {
 	}
 }
 
-type KeyValueStore struct {
-	mu   sync.RWMutex
-	data map[string]string
-}
-
-func NewKeyValueStore() *KeyValueStore {
-	return &KeyValueStore{
-		data: make(map[string]string),
-	}
-}
-
-func (kv *KeyValueStore) Set(key, value string) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.data[key] = value
-}
-
-func (kv *KeyValueStore) Get(key string) (string, bool) {
-	kv.mu.RLock()
-	defer kv.mu.RUnlock()
-	value, exists := kv.data[key]
-	return value, exists
-}
-
-func executeCommands(conn net.Conn, commands interface{}, kv *KeyValueStore) {
+func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStore) {
 	if commands == nil {
 		return
 	}
@@ -91,26 +69,5 @@ func executeCommands(conn net.Conn, commands interface{}, kv *KeyValueStore) {
 		conn.Write([]byte("+PONG\r\n"))
 	default:
 		conn.Write([]byte("-ERR unknown command\r\n"))
-	}
-}
-
-func main() {
-	listener, err := net.Listen("tcp", ":4444")
-	if err != nil {
-		log.Fatal("error listening:", err)
-	}
-
-	kv := NewKeyValueStore()
-	log.Println("Redis server started on :4444")
-
-	for {
-		c, err := listener.Accept()
-		if err != nil {
-			log.Println("error accepting connection:", err)
-			continue
-		}
-
-		log.Println("client connected")
-		go handleConnection(c, kv)
 	}
 }
