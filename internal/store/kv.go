@@ -25,3 +25,13 @@ func (kv *KeyValueStore) Get(key string) (string, bool) {
 	value, exists := kv.data[key]
 	return value, exists
 }
+
+func (kv *KeyValueStore) Del(key string) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, exists := kv.data[key]
+	if exists {
+		delete(kv.data, key)
+	}
+	return exists
+}

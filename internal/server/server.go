@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 
 	"redis-go/internal/resp"
 	"redis-go/internal/store"
@@ -47,6 +48,7 @@ func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStor
 		return
 	}
 
+	cmdStr = strings.ToUpper(cmdStr)
 	switch cmdStr {
 	case "SET":
 		if len(array) >= 3 {
@@ -54,6 +56,8 @@ func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStor
 			value, _ := array[2].(string)
 			kv.Set(key, value)
 			conn.Write([]byte("+OK\r\n"))
+		} else {
+			conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
 		}
 	case "GET":
 		if len(array) >= 2 {
@@ -64,6 +68,16 @@ func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStor
 			} else {
 				conn.Write([]byte("$-1\r\n"))
 			}
+		} else {
+			conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+		}
+	case "DEL":
+		if len(array) >= 2 {
+			key, _ := array[1].(string)
+			kv.Del(key)
+			conn.Write([]byte("+OK\r\n"))
+		} else {
+			conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
 		}
 	case "PING":
 		conn.Write([]byte("+PONG\r\n"))
