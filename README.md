@@ -1,9 +1,10 @@
 # Redis-Go
 
-A simple Redis-like server implemented in Go from scratch. This project is intended as a learning exercise to understand the basics of how Redis works, including the RESP (REdis Serialization Protocol) and concurrent client handling.
+A simple Redis-like server implemented in Go from scratch with distributed capabilities. This project demonstrates both single-node and distributed key-value storage, including the RESP (REdis Serialization Protocol) and concurrent client handling.
 
 ## Features
 
+### Single-Node Mode (Backward Compatible)
 *   In-memory key-value store.
 *   Handles multiple client connections concurrently.
 *   Implements a subset of Redis commands:
@@ -11,6 +12,14 @@ A simple Redis-like server implemented in Go from scratch. This project is inten
     *   `SET`
     *   `GET`
     *   `DEL`
+
+### Distributed Mode
+*   **Sharding**: Consistent hash-based key distribution across multiple nodes
+*   **Replication**: Master-replica setup with automatic synchronization
+*   **Persistence**: BoltDB-based storage for data durability
+*   **Cluster Communication**: HTTP-based inter-node communication
+*   **Transparent Routing**: Clients connect to any node, requests automatically routed
+*   **Configuration**: TOML-based cluster configuration
 
 ## Getting Started
 
@@ -32,21 +41,46 @@ A simple Redis-like server implemented in Go from scratch. This project is inten
     go build -o redis-go ./cmd/main.go
     ```
 
+### Single-Node Mode (Default)
+
 3.  **Run the server:**
     ```sh
     ./redis-go
     ```
     The server will start and listen on port `6380`.
 
-### Connecting to the Server
+4.  **Connect with redis-cli:**
+    ```sh
+    redis-cli -p 6380
+    ```
 
-You can use `redis-cli` to connect to the server and execute commands:
+### Distributed Mode
 
-```sh
-redis-cli -p 6380
-```
+3.  **Start the distributed cluster:**
+    ```sh
+    ./launch.sh
+    ```
+    This starts 4 shards with replicas across different ports.
 
-Once connected, you can try the supported commands:
+4.  **Connect to any shard:**
+    ```sh
+    redis-cli -p 6380  # Hanoi shard
+    redis-cli -p 6381  # Saigon shard
+    redis-cli -p 6382  # Danang shard
+    redis-cli -p 6383  # Thanh Hoa shard
+    ```
+
+    **Or connect to replicas (read-only):**
+    ```sh
+    redis-cli -p 6390  # Hanoi replica
+    redis-cli -p 6391  # Saigon replica
+    redis-cli -p 6392  # Danang replica
+    redis-cli -p 6393  # Thanh Hoa replica
+    ```
+
+### Supported Commands
+
+Once connected to either mode, you can use the following commands:
 
 ```
 127.0.0.1:6380> PING
@@ -61,24 +95,51 @@ OK
 (nil)
 ```
 
+In distributed mode, keys are automatically routed to the correct shard based on consistent hashing, so you can connect to any shard and the system will handle routing transparently.
+
 ## Project Structure
 
 ```
 .
 ├── cmd/
-│   └── main.go         # Main application entry point
+│   └── main.go         # Main application entry point with distributed support
 ├── internal/
+│   ├── config/
+│   │   └── config.go   # TOML configuration parsing and sharding logic
+│   ├── db/
+│   │   └── db.go       # BoltDB persistence layer
+│   ├── replication/
+│   │   └── replication.go # Master-replica synchronization
 │   ├── resp/
 │   │   └── parser.go   # RESP protocol parser
 │   ├── server/
-│   │   └── server.go   # Server logic for handling connections
-│   └── store/
-│       └── kv.go       # In-memory key-value store
+│   │   └── server.go   # Server logic with sharding and routing
+│   ├── store/
+│   │   └── kv.go       # In-memory key-value store with persistence
+│   └── web/
+│       └── web.go      # HTTP handlers for cluster communication
+├── persistence/        # Database files directory (ignored by git)
+├── sharding.toml       # Cluster configuration
+├── launch.sh          # Multi-node deployment script
+├── .gitignore         # Git ignore file
 ├── go.mod
 └── README.md
 ```
 
-*   **`cmd/main.go`**: The entry point of the application. It initializes the key-value store and starts the TCP server.
-*   **`internal/server`**: Contains the server implementation, which handles incoming client connections and command execution.
-*   **`internal/resp`**: Implements the parser for the RESP protocol, which is used for communication between the client and the server.
-*   **`internal/store`**: Provides a thread-safe, in-memory key-value store.
+### Key Components
+
+*   **`cmd/main.go`**: Enhanced entry point supporting both single-node and distributed modes
+*   **`internal/config`**: Handles TOML configuration parsing and consistent hashing for sharding
+*   **`internal/db`**: BoltDB-based persistence layer for data durability
+*   **`internal/replication`**: Implements master-replica synchronization for high availability
+*   **`internal/server`**: Enhanced server with automatic request routing between shards
+*   **`internal/store`**: Thread-safe key-value store with optional persistence backend
+*   **`internal/web`**: HTTP handlers for inter-node communication and cluster management
+*   **`persistence/`**: Directory containing all BoltDB database files (ignored by git)
+*   **`sharding.toml`**: Configuration file defining cluster topology and shard assignments
+*   **`launch.sh`**: Convenient script to start the entire distributed cluster
+*   **`.gitignore`**: Git ignore file excluding database files and build artifacts
+
+## Acknowledgements
+
+This project distributed mode was implemented following this repo: https://github.com/YuriyNasretdinov/distribkv
