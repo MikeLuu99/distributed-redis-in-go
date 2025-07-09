@@ -33,35 +33,32 @@ func HandleConnection(connection net.Conn, kv *store.KeyValueStore) {
 	}
 }
 
-func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStore) {
-	if commands == nil {
+func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueStore) {
+	if commands.Type != resp.RESPArray || len(commands.Array) == 0 {
 		return
 	}
 
-	array, ok := commands.([]interface{})
-	if !ok || len(array) == 0 {
+	array := commands.Array
+	if array[0].Type != resp.RESPBulkString {
 		return
 	}
 
-	cmdStr, ok := array[0].(string)
-	if !ok {
-		return
-	}
+	cmdStr := array[0].String
 
 	cmdStr = strings.ToUpper(cmdStr)
 	switch cmdStr {
 	case "SET":
-		if len(array) >= 3 {
-			key, _ := array[1].(string)
-			value, _ := array[2].(string)
+		if len(array) >= 3 && array[1].Type == resp.RESPBulkString && array[2].Type == resp.RESPBulkString {
+			key := array[1].String
+			value := array[2].String
 			kv.Set(key, value)
 			conn.Write([]byte("+OK\r\n"))
 		} else {
 			conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
 		}
 	case "GET":
-		if len(array) >= 2 {
-			key, _ := array[1].(string)
+		if len(array) >= 2 && array[1].Type == resp.RESPBulkString {
+			key := array[1].String
 			if value, exists := kv.Get(key); exists {
 				response := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
 				conn.Write([]byte(response))
@@ -72,8 +69,8 @@ func executeCommands(conn net.Conn, commands interface{}, kv *store.KeyValueStor
 			conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
 		}
 	case "DEL":
-		if len(array) >= 2 {
-			key, _ := array[1].(string)
+		if len(array) >= 2 && array[1].Type == resp.RESPBulkString {
+			key := array[1].String
 			kv.Del(key)
 			conn.Write([]byte("+OK\r\n"))
 		} else {

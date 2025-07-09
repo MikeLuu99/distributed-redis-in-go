@@ -9,6 +9,23 @@ import (
 	"strconv"
 )
 
+type RESPValue struct {
+	Type   RESPType
+	String string
+	Int    int64
+	Array  []RESPValue
+}
+
+type RESPType int
+
+const (
+	RESPString RESPType = iota
+	RESPError
+	RESPInteger
+	RESPBulkString
+	RESPArray
+)
+
 type RESPParser struct {
 	c    io.ReadWriter
 	buf  *bytes.Buffer
@@ -80,47 +97,51 @@ func readBulkString(c io.ReadWriter, buf *bytes.Buffer) (string, error) {
 	return string(bulkString), nil
 }
 
-func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (any, error) {
+func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (RESPValue, error) {
 	count, err := readLength(buf)
 
 	if err != nil {
-		return nil, err
+		return RESPValue{}, err
 	}
 
 	log.Println("array length: ", count)
-	var elems []any = make([]any, count)
+	var elems []RESPValue = make([]RESPValue, count)
 	for i := range elems {
 		elem, err := rp.parseSingle()
 		if err != nil {
-			return nil, err
+			return RESPValue{}, err
 		}
 		elems[i] = elem
 	}
 
-	return elems, nil
+	return RESPValue{Type: RESPArray, Array: elems}, nil
 }
 
-func (rp *RESPParser) parseSingle() (any, error) {
+func (rp *RESPParser) parseSingle() (RESPValue, error) {
 	b, err := rp.buf.ReadByte()
 	if err != nil {
-		return nil, err
+		return RESPValue{}, err
 	}
 	switch b {
 	case '+':
-		return readSimpleString(rp.c, rp.buf)
+		val, err := readSimpleString(rp.c, rp.buf)
+		return RESPValue{Type: RESPString, String: val}, err
 	case '-':
-		return readError(rp.c, rp.buf)
+		val, err := readError(rp.c, rp.buf)
+		return RESPValue{Type: RESPError, String: val}, err
 	case ':':
-		return readInteger(rp.c, rp.buf)
+		val, err := readInteger(rp.c, rp.buf)
+		return RESPValue{Type: RESPInteger, Int: val}, err
 	case '$':
-		return readBulkString(rp.c, rp.buf)
+		val, err := readBulkString(rp.c, rp.buf)
+		return RESPValue{Type: RESPBulkString, String: val}, err
 	case '*':
 		return readArray(rp.c, rp.buf, rp)
 	}
-	return nil, errors.New("invalid input")
+	return RESPValue{}, errors.New("invalid input")
 }
 
-func ParseRESP(c net.Conn, input_buf []byte) (any, error) {
+func ParseRESP(c net.Conn, input_buf []byte) (RESPValue, error) {
 	var b []byte
 	var buf *bytes.Buffer = bytes.NewBuffer(b)
 	buf.Write(input_buf)
