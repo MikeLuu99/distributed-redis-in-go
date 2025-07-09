@@ -1,4 +1,4 @@
-# Redis-Go
+# Distributed Redis in Go
 
 A simple Redis-like server implemented in Go from scratch with distributed capabilities. This project demonstrates both single-node and distributed key-value storage, including the RESP (REdis Serialization Protocol) and concurrent client handling.
 
