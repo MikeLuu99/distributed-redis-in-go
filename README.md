@@ -142,4 +142,4 @@ In distributed mode, keys are automatically routed to the correct shard based on
 
 ## Acknowledgements
 
-This project distributed mode was implemented following this repo: https://github.com/YuriyNasretdinov/distribkv
+This project distributed mode was implemented by following this repo: https://github.com/YuriyNasretdinov/distribkv
