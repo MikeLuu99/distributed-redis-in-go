@@ -16,7 +16,7 @@ A simple Redis-like server implemented in Go from scratch with distributed capab
 ### Distributed Mode
 *   **Sharding**: Consistent hash-based key distribution across multiple nodes
 *   **Replication**: Master-replica setup with automatic synchronization
-*   **Persistence**: BoltDB-based storage for data durability
+*   **Persistence**: [BoltDB](https://github.com/etcd-io/bbolt)-based storage for data durability
 *   **Cluster Communication**: HTTP-based inter-node communication
 *   **Transparent Routing**: Clients connect to any node, requests automatically routed
 *   **Configuration**: TOML-based cluster configuration
