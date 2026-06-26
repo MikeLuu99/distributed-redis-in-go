@@ -65,16 +65,16 @@ A simple Redis-like server implemented in Go from scratch with distributed capab
 4.  **Connect to any shard:**
     ```sh
     redis-cli -p 6380  # Hanoi shard
-    redis-cli -p 6381  # Saigon shard
-    redis-cli -p 6382  # Danang shard
+    redis-cli -p 6381  # Sai Gon shard
+    redis-cli -p 6382  # Da Nang shard
     redis-cli -p 6383  # Thanh Hoa shard
     ```
 
     **Or connect to replicas (read-only):**
     ```sh
     redis-cli -p 6390  # Hanoi replica
-    redis-cli -p 6391  # Saigon replica
-    redis-cli -p 6392  # Danang replica
+    redis-cli -p 6391  # Sai Gon replica
+    redis-cli -p 6392  # Da Nang replica
     redis-cli -p 6393  # Thanh Hoa replica
     ```
 
