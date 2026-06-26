@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"redis-go/internal/config"
 	"redis-go/internal/db"
+	"redis-go/internal/metrics"
 	"redis-go/internal/resp"
 	"redis-go/internal/store"
 )
@@ -78,7 +80,7 @@ func TestRouteToShardPreservesEmptyStringValue(t *testing.T) {
 	}
 	conn := &writeOnlyConn{}
 
-	if err := routeToShard(conn, shards, 1, "GET", "key", ""); err != nil {
+	if err := routeToShard(context.Background(), conn, shards, 1, "GET", "key", ""); err != nil {
 		t.Fatalf("routeToShard() error = %v", err)
 	}
 	if got, want := conn.String(), "$0\r\n\r\n"; got != want {
@@ -144,7 +146,7 @@ func TestRouteToShardUsesWriteMethodsForMutations(t *testing.T) {
 			}
 			conn := &writeOnlyConn{}
 
-			if err := routeToShard(conn, shards, 1, tt.command, "key", tt.value); err != nil {
+			if err := routeToShard(context.Background(), conn, shards, 1, tt.command, "key", tt.value); err != nil {
 				t.Fatalf("routeToShard() error = %v", err)
 			}
 			if got := conn.String(); got != tt.wantRESP {
@@ -152,6 +154,103 @@ func TestRouteToShardUsesWriteMethodsForMutations(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRouteToShardAddsInternalAuthHeader(t *testing.T) {
+	previousClient := httpClient
+	previousToken := internalAuthToken
+	SetInternalAuthToken("secret")
+	httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if got, want := r.Header.Get("Authorization"), "Bearer secret"; got != want {
+				t.Fatalf("Authorization = %q, want %q", got, want)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"found":false}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	defer func() {
+		httpClient = previousClient
+		SetInternalAuthToken(previousToken)
+	}()
+
+	shards := &config.Shards{
+		Count:  2,
+		CurIdx: 0,
+		Addrs:  map[int]string{1: "shard-1"},
+	}
+	if err := routeToShard(context.Background(), &writeOnlyConn{}, shards, 1, "GET", "key", ""); err != nil {
+		t.Fatalf("routeToShard() error = %v", err)
+	}
+}
+
+func TestRouteToShardUsesProvidedContext(t *testing.T) {
+	previousClient := httpClient
+	httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Context().Err() == nil {
+				t.Fatal("expected request context to be cancelled")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"found":false}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	defer func() {
+		httpClient = previousClient
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	shards := &config.Shards{
+		Count:  2,
+		CurIdx: 0,
+		Addrs:  map[int]string{1: "shard-1"},
+	}
+
+	if err := routeToShard(ctx, &writeOnlyConn{}, shards, 1, "GET", "key", ""); err != nil {
+		t.Fatalf("routeToShard() error = %v", err)
+	}
+}
+
+func TestExecuteCommandsRejectsTooManyArguments(t *testing.T) {
+	values := make([]string, maxCommandArgs+1)
+	values[0] = "GET"
+	for i := 1; i < len(values); i++ {
+		values[i] = "key"
+	}
+
+	conn := &writeOnlyConn{}
+	executeCommands(conn, command(values...), store.NewKeyValueStore(), nil)
+
+	if got, want := conn.String(), "-ERR command has too many arguments\r\n"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteCommandsRecordsCommandMetric(t *testing.T) {
+	before := metricValue("PING")
+
+	conn := &writeOnlyConn{}
+	executeCommands(conn, command("PING"), store.NewKeyValueStore(), nil)
+
+	after := metricValue("PING")
+	if before == after {
+		t.Fatalf("PING metric did not change: before=%s after=%s", before, after)
+	}
+}
+
+func metricValue(key string) string {
+	value := metrics.CommandsTotal.Get(key)
+	if value == nil {
+		return "0"
+	}
+	return value.String()
 }
 
 func TestInternalHTTPClientHasTimeout(t *testing.T) {
@@ -171,6 +270,71 @@ func TestWriteRESPSetsWriteDeadline(t *testing.T) {
 	if got, want := conn.String(), "+OK\r\n"; got != want {
 		t.Fatalf("response = %q, want %q", got, want)
 	}
+}
+
+func TestHandleConnectionProcessesPipelinedCommands(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		HandleConnection(serverConn, store.NewKeyValueStore(), nil)
+		close(done)
+	}()
+
+	_, err := clientConn.Write([]byte("*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPING\r\n"))
+	if err != nil {
+		t.Fatalf("client Write() error = %v", err)
+	}
+
+	buf := make([]byte, len("+PONG\r\n+PONG\r\n"))
+	if _, err := io.ReadFull(clientConn, buf); err != nil {
+		t.Fatalf("client ReadFull() error = %v", err)
+	}
+	if got, want := string(buf), "+PONG\r\n+PONG\r\n"; got != want {
+		t.Fatalf("responses = %q, want %q", got, want)
+	}
+
+	clientConn.Close()
+	<-done
+}
+
+func TestHandleConnectionRequiresAuthWhenConfigured(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		HandleConnectionWithOptions(serverConn, store.NewKeyValueStore(), nil, Options{AuthToken: "secret"})
+		close(done)
+	}()
+
+	if _, err := clientConn.Write([]byte("*1\r\n$4\r\nPING\r\n")); err != nil {
+		t.Fatalf("unauthenticated Write() error = %v", err)
+	}
+
+	buf := make([]byte, len("-NOAUTH Authentication required\r\n"))
+	if _, err := io.ReadFull(clientConn, buf); err != nil {
+		t.Fatalf("unauthenticated ReadFull() error = %v", err)
+	}
+	if got, want := string(buf), "-NOAUTH Authentication required\r\n"; got != want {
+		t.Fatalf("unauthenticated response = %q, want %q", got, want)
+	}
+
+	if _, err := clientConn.Write([]byte("*2\r\n$4\r\nAUTH\r\n$6\r\nsecret\r\n*1\r\n$4\r\nPING\r\n")); err != nil {
+		t.Fatalf("auth Write() error = %v", err)
+	}
+
+	buf = make([]byte, len("+OK\r\n+PONG\r\n"))
+	if _, err := io.ReadFull(clientConn, buf); err != nil {
+		t.Fatalf("auth ReadFull() error = %v", err)
+	}
+	if got, want := string(buf), "+OK\r\n+PONG\r\n"; got != want {
+		t.Fatalf("auth response = %q, want %q", got, want)
+	}
+
+	clientConn.Close()
+	<-done
 }
 
 func TestReplicaWriteReturnsErrorAndDoesNotMutateMemory(t *testing.T) {

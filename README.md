@@ -109,7 +109,24 @@ Current guarantees:
 *   Master writes are persisted to local BoltDB before success is returned.
 *   Replication is asynchronous, so replicas may lag behind masters.
 *   Replica writes are rejected through the Redis command path.
-*   The system does not yet provide automatic failover, leader election, strong consistency, online resharding, authentication, or TLS.
+*   Optional Redis `AUTH` is available with `-auth-token`.
+*   Optional bearer authentication for internal HTTP APIs is available with `-internal-auth-token`.
+*   Optional TLS for Redis and HTTP listeners is available with `-tls-cert-file` and `-tls-key-file`.
+*   The system does not yet provide automatic failover, leader election, strong consistency, or online resharding.
+
+Durability and replication notes:
+
+*   BoltDB commits are completed before local write success is returned.
+*   Replication uses a persistent ordered log stored in BoltDB.
+*   Replicas acknowledge log entries by sequence ID after applying them locally.
+*   A master crash after local commit but before replica acknowledgement can leave replicas behind until the master recovers.
+*   A master disk loss can still lose acknowledged writes that were not replicated elsewhere.
+
+Operational endpoints:
+
+*   `GET /healthz`: process liveness.
+*   `GET /readyz`: DB readiness, shard metadata, and replication queue depth.
+*   `GET /debug/vars`: expvar metrics, including command counts, HTTP handler counts, routing failures, and replication counters.
 
 ## Project Structure
 
@@ -161,16 +178,17 @@ This project is currently a learning/demo distributed key-value store. The backl
 ### P0: Correctness and Safety
 
 - [x] Define the production contract: Redis-compatible cache, durable KV, or strongly consistent KV.
-- [ ] Replace the RESP parser with a robust incremental parser that supports partial reads, pipelining, malformed inputs, and max payload limits.
+- [x] Replace the RESP parser with a robust incremental parser that supports partial reads, pipelining, malformed inputs, and max payload limits.
 - [x] Add initial RESP read/write deadlines, HTTP server timeouts, and internal HTTP client timeouts.
-- [ ] Add context propagation, cancellation, and broader bounded request handling.
+- [x] Add context propagation, cancellation, and broader bounded request handling.
 - [x] Stop using HTTP GET for mutations; use proper write methods or a dedicated internal RPC protocol.
-- [ ] Replace one-key polling replication with an ordered write log, offsets, acknowledgements, retries, replay, and persistent replica progress.
-- [ ] Define durability guarantees for BoltDB transactions, fsync behavior, crash recovery, and partially replicated writes.
-- [ ] Add authentication and TLS for both client traffic and node-to-node traffic.
-- [ ] Add health and readiness endpoints for shard ownership, DB status, and replication status.
-- [ ] Add structured logging and metrics for command latency, errors, QPS, replication lag, queue depth, DB writes, routing failures, and active connections.
-- [ ] Add integration tests for multi-node routing, persistence after restart, replica catch-up, delete propagation, empty values, concurrent clients, and node restarts.
+- [x] Replace one-key polling replication with an ordered write log, offsets, acknowledgements, retries, replay, and persistent replica progress.
+- [x] Define durability guarantees for BoltDB transactions, fsync behavior, crash recovery, and partially replicated writes.
+- [x] Add authentication and TLS for both client traffic and node-to-node traffic.
+- [x] Add health and readiness endpoints for shard ownership, DB status, and replication status.
+- [x] Add baseline metrics for commands, command errors, HTTP handlers, routing failures, replication events, and replication errors.
+- [x] Add detailed latency, QPS, replication lag, DB write, queue depth, and active connection metrics.
+- [x] Add integration tests for multi-node routing, persistence after restart, replica catch-up, delete propagation, empty values, concurrent clients, and node restarts.
 
 ### P1: Availability and Distributed Behavior
 

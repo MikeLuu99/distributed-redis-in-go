@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"redis-go/internal/config"
@@ -75,7 +76,16 @@ func TestReplicationHandlerReportsDeleteEvents(t *testing.T) {
 	rec := httptest.NewRecorder()
 	server.SetHandler(rec, req)
 
-	req = httptest.NewRequest(http.MethodDelete, "/delete-replication-key?key=key&value=value", nil)
+	req = httptest.NewRequest(http.MethodGet, "/next-replication-key", nil)
+	rec = httptest.NewRecorder()
+	server.GetNextKeyForReplication(rec, req)
+
+	var setEvent replication.NextKeyValue
+	if err := json.NewDecoder(rec.Body).Decode(&setEvent); err != nil {
+		t.Fatalf("decode set NextKeyValue: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/delete-replication-key?id="+strconv.FormatUint(setEvent.ID, 10)+"&key=key&value=value", nil)
 	rec = httptest.NewRecorder()
 	server.DeleteReplicationKey(rec, req)
 	if rec.Code != http.StatusOK {
@@ -97,7 +107,7 @@ func TestReplicationHandlerReportsDeleteEvents(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&event); err != nil {
 		t.Fatalf("decode NextKeyValue: %v", err)
 	}
-	if !event.Present || !event.Deleted || event.Key != "key" || event.Value != "" || event.Error != "" {
+	if !event.Present || event.ID == 0 || !event.Deleted || event.Key != "key" || event.Value != "" || event.Error != "" {
 		t.Fatalf("unexpected delete replication event: %+v", event)
 	}
 }
@@ -155,5 +165,76 @@ func TestMutationHandlersRejectWrongMethods(t *testing.T) {
 func TestInternalHTTPClientHasTimeout(t *testing.T) {
 	if httpClient.Timeout != internalHTTPTimeout {
 		t.Fatalf("httpClient.Timeout = %v, want %v", httpClient.Timeout, internalHTTPTimeout)
+	}
+}
+
+func TestHealthAndReadinessHandlers(t *testing.T) {
+	server, closeDB := newWebTestServer(t)
+	defer closeDB()
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	server.HealthHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HealthHandler() status = %d", rec.Code)
+	}
+
+	var health HealthResponse
+	if err := json.NewDecoder(rec.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if health.Status != "ok" {
+		t.Fatalf("health status = %q, want ok", health.Status)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec = httptest.NewRecorder()
+	server.ReadinessHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ReadinessHandler() status = %d", rec.Code)
+	}
+
+	var readiness ReadinessResponse
+	if err := json.NewDecoder(rec.Body).Decode(&readiness); err != nil {
+		t.Fatalf("decode readiness response: %v", err)
+	}
+	if readiness.Status != "ok" || readiness.ShardCount != 1 || readiness.ShardIndex != 0 {
+		t.Fatalf("unexpected readiness response: %+v", readiness)
+	}
+}
+
+func TestInternalAuthProtectsReadyAndDataHandlers(t *testing.T) {
+	database, closeDB, err := db.NewDatabase(t.TempDir()+"/test.db", false)
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	defer closeDB()
+
+	server := NewServerWithAuth(database, &config.Shards{
+		Count:  1,
+		CurIdx: 0,
+		Addrs:  map[int]string{0: "127.0.0.1:8080"},
+	}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	server.ReadinessHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("ReadinessHandler() without auth status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	server.ReadinessHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ReadinessHandler() with auth status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec = httptest.NewRecorder()
+	server.HealthHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HealthHandler() status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }

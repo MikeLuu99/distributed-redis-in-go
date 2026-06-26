@@ -2,23 +2,28 @@ package db
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
+
+	"redis-go/internal/metrics"
 )
 
 var defaultBucket = []byte("default")
 var replicaBucket = []byte("replication")
 
 type replicationRecord struct {
+	Key   string `json:"key"`
 	Op    string `json:"op"`
 	Value string `json:"value,omitempty"`
 }
 
 // ReplicationEvent describes a pending change for replicas.
 type ReplicationEvent struct {
+	ID      uint64
 	Key     string
 	Value   string
 	Deleted bool
@@ -67,6 +72,7 @@ func (d *Database) SetKey(key string, value []byte) error {
 	}
 
 	record, err := encodeReplicationRecord(replicationRecord{
+		Key:   key,
 		Op:    "set",
 		Value: string(value),
 	})
@@ -74,13 +80,17 @@ func (d *Database) SetKey(key string, value []byte) error {
 		return err
 	}
 
-	return d.db.Update(func(tx *bolt.Tx) error {
+	err = d.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(defaultBucket).Put([]byte(key), value); err != nil {
 			return err
 		}
 
-		return tx.Bucket(replicaBucket).Put([]byte(key), record)
+		return appendReplicationRecord(tx.Bucket(replicaBucket), record)
 	})
+	if err == nil {
+		metrics.DBWritesTotal.Add(1)
+	}
+	return err
 }
 
 // SetKeyOnReplica sets the key to the requested value into the default database and does not write
@@ -117,7 +127,8 @@ func (d *Database) GetNextKeyForReplication() (event ReplicationEvent, present b
 		}
 
 		event = ReplicationEvent{
-			Key:     string(k),
+			ID:      bytesToUint64(k),
+			Key:     record.Key,
 			Value:   record.Value,
 			Deleted: record.Op == "del",
 		}
@@ -134,12 +145,13 @@ func (d *Database) GetNextKeyForReplication() (event ReplicationEvent, present b
 
 // DeleteReplicationKey deletes the key from the replication queue if the
 // operation and value still match the pending change.
-func (d *Database) DeleteReplicationKey(key string, value string, deleted bool) (err error) {
+func (d *Database) DeleteReplicationKey(id uint64, key string, value string, deleted bool) (err error) {
 	op := "set"
 	if deleted {
 		op = "del"
 	}
 	record, err := encodeReplicationRecord(replicationRecord{
+		Key:   key,
 		Op:    op,
 		Value: value,
 	})
@@ -149,8 +161,9 @@ func (d *Database) DeleteReplicationKey(key string, value string, deleted bool) 
 
 	return d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(replicaBucket)
+		idBytes := uint64ToBytes(id)
 
-		v := b.Get([]byte(key))
+		v := b.Get(idBytes)
 		if v == nil {
 			return errors.New("key does not exist")
 		}
@@ -159,7 +172,7 @@ func (d *Database) DeleteReplicationKey(key string, value string, deleted bool) 
 			return errors.New("value does not match")
 		}
 
-		return b.Delete([]byte(key))
+		return b.Delete(idBytes)
 	})
 }
 
@@ -178,13 +191,39 @@ func (d *Database) GetKey(key string) ([]byte, error) {
 	return nil, err
 }
 
+func (d *Database) Ping() error {
+	return d.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(defaultBucket) == nil {
+			return errors.New("default bucket missing")
+		}
+		if tx.Bucket(replicaBucket) == nil {
+			return errors.New("replication bucket missing")
+		}
+		return nil
+	})
+}
+
+func (d *Database) ReplicationQueueDepth() (int, error) {
+	count := 0
+	err := d.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(replicaBucket).ForEach(func(_, _ []byte) error {
+			count++
+			return nil
+		})
+	})
+	if err == nil {
+		metrics.ReplicationQueueDepth.Set(int64(count))
+	}
+	return count, err
+}
+
 // DelKey deletes the key from the database.
 func (d *Database) DelKey(key string) (bool, error) {
 	if d.readOnly {
 		return false, errors.New("read-only mode")
 	}
 
-	record, err := encodeReplicationRecord(replicationRecord{Op: "del"})
+	record, err := encodeReplicationRecord(replicationRecord{Key: key, Op: "del"})
 	if err != nil {
 		return false, err
 	}
@@ -198,9 +237,30 @@ func (d *Database) DelKey(key string) (bool, error) {
 		if err := b.Delete([]byte(key)); err != nil {
 			return err
 		}
-		return tx.Bucket(replicaBucket).Put([]byte(key), record)
+		return appendReplicationRecord(tx.Bucket(replicaBucket), record)
 	})
+	if err == nil {
+		metrics.DBWritesTotal.Add(1)
+	}
 	return existed, err
+}
+
+func appendReplicationRecord(bucket *bolt.Bucket, record []byte) error {
+	id, err := bucket.NextSequence()
+	if err != nil {
+		return err
+	}
+	return bucket.Put(uint64ToBytes(id), record)
+}
+
+func uint64ToBytes(value uint64) []byte {
+	var out [8]byte
+	binary.BigEndian.PutUint64(out[:], value)
+	return out[:]
+}
+
+func bytesToUint64(value []byte) uint64 {
+	return binary.BigEndian.Uint64(value)
 }
 
 // DeleteExtraKeys deletes the keys that do not belong to this shard.

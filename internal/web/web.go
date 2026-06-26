@@ -10,13 +10,15 @@ import (
 
 	"redis-go/internal/config"
 	"redis-go/internal/db"
+	"redis-go/internal/metrics"
 	"redis-go/internal/replication"
 )
 
 // Server contains HTTP method handlers to be used for the database.
 type Server struct {
-	db     *db.Database
-	shards *config.Shards
+	db            *db.Database
+	shards        *config.Shards
+	internalToken string
 }
 
 const internalHTTPTimeout = 3 * time.Second
@@ -25,10 +27,70 @@ var httpClient = &http.Client{Timeout: internalHTTPTimeout}
 
 // NewServer creates a new instance with HTTP handlers to be used to get and set values.
 func NewServer(db *db.Database, s *config.Shards) *Server {
+	return NewServerWithAuth(db, s, "")
+}
+
+func NewServerWithAuth(db *db.Database, s *config.Shards, internalToken string) *Server {
 	return &Server{
-		db:     db,
-		shards: s,
+		db:            db,
+		shards:        s,
+		internalToken: internalToken,
 	}
+}
+
+type HealthResponse struct {
+	Status string `json:"status"`
+}
+
+type ReadinessResponse struct {
+	Status                string `json:"status"`
+	ShardIndex            int    `json:"shard_index"`
+	ShardCount            int    `json:"shard_count"`
+	ReplicationQueueDepth int    `json:"replication_queue_depth"`
+	Error                 string `json:"error,omitempty"`
+}
+
+func (s *Server) HealthHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("healthz", time.Now())
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	writeJSON(w, HealthResponse{Status: "ok"})
+}
+
+func (s *Server) ReadinessHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("readyz", time.Now())
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if !s.requireAuth(w, r) {
+		return
+	}
+
+	response := ReadinessResponse{
+		Status:     "ok",
+		ShardIndex: s.shards.CurIdx,
+		ShardCount: s.shards.Count,
+	}
+
+	if err := s.db.Ping(); err != nil {
+		response.Status = "error"
+		response.Error = err.Error()
+		writeJSONStatus(w, http.StatusServiceUnavailable, response)
+		return
+	}
+
+	depth, err := s.db.ReplicationQueueDepth()
+	if err != nil {
+		response.Status = "error"
+		response.Error = err.Error()
+		writeJSONStatus(w, http.StatusServiceUnavailable, response)
+		return
+	}
+	response.ReplicationQueueDepth = depth
+
+	writeJSON(w, response)
 }
 
 func (s *Server) redirect(shard int, w http.ResponseWriter, r *http.Request) {
@@ -40,6 +102,9 @@ func (s *Server) redirect(shard int, w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, "Error building redirect request: %v", err)
 		return
+	}
+	if s.internalToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.internalToken)
 	}
 
 	resp, err := httpClient.Do(req)
@@ -62,7 +127,11 @@ type GetResponse struct {
 
 // GetHandler handles read requests from the database.
 func (s *Server) GetHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("get", time.Now())
 	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
@@ -88,7 +157,7 @@ func (s *Server) GetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 // SetResponse represents the JSON response for SET operations
@@ -99,7 +168,11 @@ type SetResponse struct {
 
 // SetHandler handles write requests from the database.
 func (s *Server) SetHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("set", time.Now())
 	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
@@ -124,7 +197,7 @@ func (s *Server) SetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 // DelResponse represents the JSON response for DEL operations
@@ -135,7 +208,11 @@ type DelResponse struct {
 
 // DelHandler handles delete requests from the database.
 func (s *Server) DelHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("del", time.Now())
 	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
@@ -159,12 +236,16 @@ func (s *Server) DelHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
 // DeleteExtraKeysHandler deletes keys that don't belong to the current shard.
 func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("purge", time.Now())
 	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
@@ -175,13 +256,18 @@ func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) 
 
 // GetNextKeyForReplication returns the next key for replication.
 func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("next-replication-key", time.Now())
 	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
 	enc := json.NewEncoder(w)
 	event, present, err := s.db.GetNextKeyForReplication()
 	res := replication.NextKeyValue{
+		ID:      event.ID,
 		Key:     event.Key,
 		Value:   event.Value,
 		Deleted: event.Deleted,
@@ -195,11 +281,22 @@ func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request
 
 // DeleteReplicationKey deletes the key from replica queue.
 func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("delete-replication-key", time.Now())
 	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+	if !s.requireAuth(w, r) {
 		return
 	}
 
 	r.ParseForm()
+
+	id, err := strconv.ParseUint(r.Form.Get("id"), 10, 64)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "error: invalid replication id: %v", err)
+		return
+	}
 
 	key := r.Form.Get("key")
 	value := r.Form.Get("value")
@@ -214,7 +311,7 @@ func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = s.db.DeleteReplicationKey(key, value, deleted)
+	err = s.db.DeleteReplicationKey(id, key, value, deleted)
 	if err != nil {
 		w.WriteHeader(http.StatusExpectationFailed)
 		fmt.Fprintf(w, "error: %v", err)
@@ -231,4 +328,25 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	w.Header().Set("Allow", method)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	return false
+}
+
+func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.internalToken == "" {
+		return true
+	}
+	if r.Header.Get("Authorization") == "Bearer "+s.internalToken {
+		return true
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+func writeJSON(w http.ResponseWriter, value interface{}) {
+	writeJSONStatus(w, http.StatusOK, value)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, value interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(value)
 }

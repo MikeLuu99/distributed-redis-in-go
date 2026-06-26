@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"redis-go/internal/config"
+	"redis-go/internal/metrics"
 	"redis-go/internal/resp"
 	"redis-go/internal/store"
 )
@@ -19,6 +21,7 @@ const (
 	clientReadTimeout   = 5 * time.Minute
 	clientWriteTimeout  = 10 * time.Second
 	internalHTTPTimeout = 3 * time.Second
+	maxCommandArgs      = resp.MaxArrayElements
 )
 
 // Response structures for JSON parsing
@@ -39,36 +42,71 @@ type DelResponse struct {
 }
 
 var httpClient = &http.Client{Timeout: internalHTTPTimeout}
+var internalAuthToken string
+
+type Options struct {
+	AuthToken string
+}
+
+func SetInternalAuthToken(token string) {
+	internalAuthToken = token
+}
 
 func HandleConnection(connection net.Conn, kv *store.KeyValueStore, shards *config.Shards) {
+	HandleConnectionWithOptions(connection, kv, shards, Options{})
+}
+
+func HandleConnectionWithOptions(connection net.Conn, kv *store.KeyValueStore, shards *config.Shards, opts Options) {
 	defer connection.Close()
+	metrics.ActiveConnections.Add(1)
+	defer metrics.ActiveConnections.Add(-1)
 	log.Printf("client connected on: %s\n", connection.RemoteAddr().String())
 
+	parser := resp.NewParser(connection)
+	authenticated := opts.AuthToken == ""
 	for {
-		var buffer []byte = make([]byte, 50*1024)
 		if err := connection.SetReadDeadline(time.Now().Add(clientReadTimeout)); err != nil {
 			log.Println("error setting read deadline:", err)
 			return
 		}
-		n, err := connection.Read(buffer[:])
-		if err != nil {
-			connection.Close()
-			log.Println("client disconnected with ", err.Error())
-			break
-		}
 
-		commands, err := resp.ParseRESP(connection, buffer[:n])
+		commands, err := parser.Parse()
 		if err != nil {
-			log.Println("error parsing RESP:", err)
-			continue
+			log.Println("client disconnected or sent invalid RESP:", err)
+			return
 		}
 		log.Println(commands)
+
+		if !authenticated {
+			if isAuthCommand(commands, opts.AuthToken) {
+				authenticated = true
+				writeRESP(connection, "+OK\r\n")
+			} else {
+				writeRESP(connection, "-NOAUTH Authentication required\r\n")
+			}
+			continue
+		}
+
 		executeCommands(connection, commands, kv, shards)
 	}
 }
 
+func isAuthCommand(commands resp.RESPValue, token string) bool {
+	if commands.Type != resp.RESPArray || len(commands.Array) != 2 {
+		return false
+	}
+	if commands.Array[0].Type != resp.RESPBulkString || commands.Array[1].Type != resp.RESPBulkString {
+		return false
+	}
+	return strings.EqualFold(commands.Array[0].String, "AUTH") && commands.Array[1].String == token
+}
+
 func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueStore, shards *config.Shards) {
 	if commands.Type != resp.RESPArray || len(commands.Array) == 0 {
+		return
+	}
+	if len(commands.Array) > maxCommandArgs {
+		writeRESP(conn, "-ERR command has too many arguments\r\n")
 		return
 	}
 
@@ -80,6 +118,8 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 	cmdStr := array[0].String
 
 	cmdStr = strings.ToUpper(cmdStr)
+	metrics.AddCommand(cmdStr)
+	defer metrics.ObserveCommand(cmdStr, time.Now())
 	switch cmdStr {
 	case "SET":
 		if len(array) >= 3 && array[1].Type == resp.RESPBulkString && array[2].Type == resp.RESPBulkString {
@@ -90,7 +130,9 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 			if shards != nil {
 				shard := shards.Index(key)
 				if shard != shards.CurIdx {
-					if err := routeToShard(conn, shards, shard, "SET", key, value); err != nil {
+					if err := routeToShard(context.Background(), conn, shards, shard, "SET", key, value); err != nil {
+						metrics.RoutingFailuresTotal.Add(1)
+						metrics.AddCommandError(cmdStr)
 						writeRESP(conn, fmt.Sprintf("-ERR routing failed: %v\r\n", err))
 					}
 					return
@@ -98,6 +140,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 			}
 
 			if err := kv.Set(key, value); err != nil {
+				metrics.AddCommandError(cmdStr)
 				writeRESP(conn, fmt.Sprintf("-ERR %s\r\n", err))
 				return
 			}
@@ -113,7 +156,9 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 			if shards != nil {
 				shard := shards.Index(key)
 				if shard != shards.CurIdx {
-					if err := routeToShard(conn, shards, shard, "GET", key, ""); err != nil {
+					if err := routeToShard(context.Background(), conn, shards, shard, "GET", key, ""); err != nil {
+						metrics.RoutingFailuresTotal.Add(1)
+						metrics.AddCommandError(cmdStr)
 						writeRESP(conn, fmt.Sprintf("-ERR routing failed: %v\r\n", err))
 					}
 					return
@@ -122,6 +167,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 
 			value, exists, err := kv.Get(key)
 			if err != nil {
+				metrics.AddCommandError(cmdStr)
 				writeRESP(conn, fmt.Sprintf("-ERR %s\r\n", err))
 				return
 			}
@@ -142,7 +188,9 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 			if shards != nil {
 				shard := shards.Index(key)
 				if shard != shards.CurIdx {
-					if err := routeToShard(conn, shards, shard, "DEL", key, ""); err != nil {
+					if err := routeToShard(context.Background(), conn, shards, shard, "DEL", key, ""); err != nil {
+						metrics.RoutingFailuresTotal.Add(1)
+						metrics.AddCommandError(cmdStr)
 						writeRESP(conn, fmt.Sprintf("-ERR routing failed: %v\r\n", err))
 					}
 					return
@@ -150,6 +198,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 			}
 
 			if _, err := kv.Del(key); err != nil {
+				metrics.AddCommandError(cmdStr)
 				writeRESP(conn, fmt.Sprintf("-ERR %s\r\n", err))
 				return
 			}
@@ -160,12 +209,13 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 	case "PING":
 		writeRESP(conn, "+PONG\r\n")
 	default:
+		metrics.AddCommandError(cmdStr)
 		writeRESP(conn, "-ERR unknown command\r\n")
 	}
 }
 
 // routeToShard routes a command to the appropriate shard via HTTP
-func routeToShard(conn net.Conn, shards *config.Shards, shard int, cmd, key, value string) error {
+func routeToShard(ctx context.Context, conn net.Conn, shards *config.Shards, shard int, cmd, key, value string) error {
 	addr := shards.Addrs[shard]
 
 	var httpURL, method string
@@ -190,9 +240,12 @@ func routeToShard(conn net.Conn, shards *config.Shards, shard int, cmd, key, val
 		return fmt.Errorf("unsupported command for routing: %s", cmd)
 	}
 
-	req, err := http.NewRequest(method, httpURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, httpURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to build routed request: %v", err)
+	}
+	if internalAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+internalAuthToken)
 	}
 
 	resp, err := httpClient.Do(req)

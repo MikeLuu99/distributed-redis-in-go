@@ -1,13 +1,21 @@
 package resp
 
 import (
-	"bytes"
+	"bufio"
 	"errors"
+	"fmt"
 	"io"
-	"log"
-	"net"
 	"strconv"
+	"strings"
 )
+
+const (
+	MaxBulkStringSize = 512 * 1024 * 1024
+	MaxArrayElements  = 1024
+	MaxLineSize       = 64 * 1024
+)
+
+var ErrNullBulkString = errors.New("null bulk string is not supported")
 
 type RESPValue struct {
 	Type   RESPType
@@ -26,130 +34,117 @@ const (
 	RESPArray
 )
 
-type RESPParser struct {
-	c    io.ReadWriter
-	buf  *bytes.Buffer
-	tbuf []byte
+type Parser struct {
+	reader *bufio.Reader
 }
 
-func readStringUntilSr(buf *bytes.Buffer) (string, error) {
-	s, err := buf.ReadString('\r')
-	if err != nil {
-		return "", err
-	}
-
-	buf.ReadByte()
-	return s[:len(s)-1], nil
+func NewParser(r io.Reader) *Parser {
+	return &Parser{reader: bufio.NewReader(r)}
 }
 
-func readSimpleString(c io.ReadWriter, buf *bytes.Buffer) (string, error) {
-	return readStringUntilSr(buf)
-}
-
-func readError(c io.ReadWriter, buf *bytes.Buffer) (string, error) {
-	return readStringUntilSr(buf)
-}
-
-func readInteger(c io.ReadWriter, buf *bytes.Buffer) (int64, error) {
-	s, err := readStringUntilSr(buf)
-	if err != nil {
-		return 0, err
-	}
-
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	return v, nil
-}
-
-func readLength(buf *bytes.Buffer) (int64, error) {
-	s, err := readStringUntilSr(buf)
-	if err != nil {
-		return 0, err
-	}
-
-	v, err := strconv.ParseInt(s, 10, 64)
-
-	if err != nil {
-		return 0, err
-	}
-
-	return v, nil
-
-}
-
-func readBulkString(c io.ReadWriter, buf *bytes.Buffer) (string, error) {
-	len, err := readLength(buf)
-	if err != nil {
-		return "", err
-	}
-
-	bulkString := make([]byte, len)
-	_, err = buf.Read(bulkString)
-	if err != nil {
-		return "", err
-	}
-
-	buf.ReadByte()
-	buf.ReadByte()
-
-	return string(bulkString), nil
-}
-
-func readArray(c io.ReadWriter, buf *bytes.Buffer, rp *RESPParser) (RESPValue, error) {
-	count, err := readLength(buf)
-
+func (p *Parser) Parse() (RESPValue, error) {
+	prefix, err := p.reader.ReadByte()
 	if err != nil {
 		return RESPValue{}, err
 	}
 
-	log.Println("array length: ", count)
-	var elems []RESPValue = make([]RESPValue, count)
-	for i := range elems {
-		elem, err := rp.parseSingle()
+	switch prefix {
+	case '+':
+		value, err := p.readLine()
+		return RESPValue{Type: RESPString, String: value}, err
+	case '-':
+		value, err := p.readLine()
+		return RESPValue{Type: RESPError, String: value}, err
+	case ':':
+		value, err := p.readInteger()
+		return RESPValue{Type: RESPInteger, Int: value}, err
+	case '$':
+		value, err := p.readBulkString()
+		return RESPValue{Type: RESPBulkString, String: value}, err
+	case '*':
+		return p.readArray()
+	default:
+		return RESPValue{}, fmt.Errorf("invalid RESP type byte %q", prefix)
+	}
+}
+
+func (p *Parser) readLine() (string, error) {
+	line, err := p.reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	if len(line) > MaxLineSize {
+		return "", fmt.Errorf("RESP line exceeds %d bytes", MaxLineSize)
+	}
+	if !strings.HasSuffix(line, "\r\n") {
+		return "", errors.New("RESP line missing CRLF terminator")
+	}
+	return strings.TrimSuffix(line, "\r\n"), nil
+}
+
+func (p *Parser) readInteger() (int64, error) {
+	line, err := p.readLine()
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.ParseInt(line, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid RESP integer %q: %w", line, err)
+	}
+	return value, nil
+}
+
+func (p *Parser) readLength(max int64) (int64, error) {
+	length, err := p.readInteger()
+	if err != nil {
+		return 0, err
+	}
+	if length < -1 {
+		return 0, fmt.Errorf("invalid RESP length %d", length)
+	}
+	if length > max {
+		return 0, fmt.Errorf("RESP length %d exceeds max %d", length, max)
+	}
+	return length, nil
+}
+
+func (p *Parser) readBulkString() (string, error) {
+	length, err := p.readLength(MaxBulkStringSize)
+	if err != nil {
+		return "", err
+	}
+	if length == -1 {
+		return "", ErrNullBulkString
+	}
+
+	data := make([]byte, length+2)
+	if _, err := io.ReadFull(p.reader, data); err != nil {
+		return "", err
+	}
+	if data[length] != '\r' || data[length+1] != '\n' {
+		return "", errors.New("bulk string missing CRLF terminator")
+	}
+
+	return string(data[:length]), nil
+}
+
+func (p *Parser) readArray() (RESPValue, error) {
+	count, err := p.readLength(MaxArrayElements)
+	if err != nil {
+		return RESPValue{}, err
+	}
+	if count == -1 {
+		return RESPValue{}, errors.New("null array is not supported")
+	}
+
+	values := make([]RESPValue, count)
+	for i := range values {
+		value, err := p.Parse()
 		if err != nil {
 			return RESPValue{}, err
 		}
-		elems[i] = elem
+		values[i] = value
 	}
 
-	return RESPValue{Type: RESPArray, Array: elems}, nil
-}
-
-func (rp *RESPParser) parseSingle() (RESPValue, error) {
-	b, err := rp.buf.ReadByte()
-	if err != nil {
-		return RESPValue{}, err
-	}
-	switch b {
-	case '+':
-		val, err := readSimpleString(rp.c, rp.buf)
-		return RESPValue{Type: RESPString, String: val}, err
-	case '-':
-		val, err := readError(rp.c, rp.buf)
-		return RESPValue{Type: RESPError, String: val}, err
-	case ':':
-		val, err := readInteger(rp.c, rp.buf)
-		return RESPValue{Type: RESPInteger, Int: val}, err
-	case '$':
-		val, err := readBulkString(rp.c, rp.buf)
-		return RESPValue{Type: RESPBulkString, String: val}, err
-	case '*':
-		return readArray(rp.c, rp.buf, rp)
-	}
-	return RESPValue{}, errors.New("invalid input")
-}
-
-func ParseRESP(c net.Conn, input_buf []byte) (RESPValue, error) {
-	var b []byte
-	var buf *bytes.Buffer = bytes.NewBuffer(b)
-	buf.Write(input_buf)
-
-	rp := &RESPParser{
-		c:   c,
-		buf: buf,
-	}
-
-	return rp.parseSingle()
+	return RESPValue{Type: RESPArray, Array: values}, nil
 }

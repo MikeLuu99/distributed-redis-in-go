@@ -1,10 +1,12 @@
 package replication
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"redis-go/internal/db"
 )
@@ -32,12 +34,12 @@ func TestClientLoopAppliesDeleteEventToReplica(t *testing.T) {
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			switch r.URL.Path {
 			case "/next-replication-key":
-				return response(`{"key":"key","value":"","deleted":true,"present":true}`), nil
+				return response(`{"id":7,"key":"key","value":"","deleted":true,"present":true}`), nil
 			case "/delete-replication-key":
 				if r.Method != http.MethodDelete {
 					t.Fatalf("method = %s, want %s", r.Method, http.MethodDelete)
 				}
-				if r.URL.Query().Get("key") != "key" || r.URL.Query().Get("deleted") != "true" {
+				if r.URL.Query().Get("id") != "7" || r.URL.Query().Get("key") != "key" || r.URL.Query().Get("deleted") != "true" {
 					t.Fatalf("unexpected delete acknowledgement query: %s", r.URL.RawQuery)
 				}
 				deleteAcknowledged = true
@@ -52,7 +54,7 @@ func TestClientLoopAppliesDeleteEventToReplica(t *testing.T) {
 		httpClient = previousClient
 	}()
 
-	present, err := (&client{db: database, leaderAddr: "leader"}).loop()
+	present, err := (&client{db: database, leaderAddr: "leader"}).loop(context.Background())
 	if err != nil {
 		t.Fatalf("loop() error = %v", err)
 	}
@@ -75,6 +77,57 @@ func TestClientLoopAppliesDeleteEventToReplica(t *testing.T) {
 func TestHTTPClientHasTimeout(t *testing.T) {
 	if httpClient.Timeout != internalHTTPTimeout {
 		t.Fatalf("httpClient.Timeout = %v, want %v", httpClient.Timeout, internalHTTPTimeout)
+	}
+}
+
+func TestReplicationRequestsIncludeInternalAuthHeader(t *testing.T) {
+	database, closeDB, err := db.NewDatabase(t.TempDir()+"/replica.db", true)
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	defer closeDB()
+
+	previousClient := httpClient
+	previousToken := internalAuthToken
+	SetInternalAuthToken("secret")
+	httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if got, want := r.Header.Get("Authorization"), "Bearer secret"; got != want {
+				t.Fatalf("Authorization = %q, want %q", got, want)
+			}
+			return response(`{"present":false}`), nil
+		}),
+	}
+	defer func() {
+		httpClient = previousClient
+		SetInternalAuthToken(previousToken)
+	}()
+
+	if _, err := (&client{db: database, leaderAddr: "leader"}).loop(context.Background()); err != nil {
+		t.Fatalf("loop() error = %v", err)
+	}
+}
+
+func TestClientLoopWithContextStopsOnCancellation(t *testing.T) {
+	database, closeDB, err := db.NewDatabase(t.TempDir()+"/replica.db", true)
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	defer closeDB()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		ClientLoopWithContext(ctx, database, "leader")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ClientLoopWithContext did not stop after cancellation")
 	}
 }
 
