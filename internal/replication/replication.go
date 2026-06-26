@@ -27,7 +27,9 @@ type client struct {
 	leaderAddr string
 }
 
-var httpClient = http.DefaultClient
+const internalHTTPTimeout = 3 * time.Second
+
+var httpClient = &http.Client{Timeout: internalHTTPTimeout}
 
 // ClientLoop continuously downloads new keys from the master and applies them.
 func ClientLoop(db *db.Database, leaderAddr string) {
@@ -51,12 +53,15 @@ func (c *client) loop() (present bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, errors.New(resp.Status)
+	}
 
 	var res NextKeyValue
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
 
 	if res.Error != "" {
 		return false, errors.New(res.Error)
@@ -93,11 +98,19 @@ func (c *client) deleteFromReplicationQueue(key, value string, deleted bool) err
 
 	log.Printf("Deleting key=%q, value=%q from replication queue on %q", key, value, c.leaderAddr)
 
-	resp, err := httpClient.Get("http://" + c.leaderAddr + "/delete-replication-key?" + u.Encode())
+	req, err := http.NewRequest(http.MethodDelete, "http://"+c.leaderAddr+"/delete-replication-key?"+u.Encode(), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errors.New(resp.Status)
+	}
 
 	result, err := ioutil.ReadAll(resp.Body)
 	if err != nil {

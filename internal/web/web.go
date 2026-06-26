@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	"redis-go/internal/config"
 	"redis-go/internal/db"
@@ -18,6 +19,10 @@ type Server struct {
 	shards *config.Shards
 }
 
+const internalHTTPTimeout = 3 * time.Second
+
+var httpClient = &http.Client{Timeout: internalHTTPTimeout}
+
 // NewServer creates a new instance with HTTP handlers to be used to get and set values.
 func NewServer(db *db.Database, s *config.Shards) *Server {
 	return &Server{
@@ -27,12 +32,19 @@ func NewServer(db *db.Database, s *config.Shards) *Server {
 }
 
 func (s *Server) redirect(shard int, w http.ResponseWriter, r *http.Request) {
-	url := "http://" + s.shards.Addrs[shard] + r.RequestURI
-	fmt.Fprintf(w, "redirecting from shard %d to shard %d (%q)\n", s.shards.CurIdx, shard, url)
+	targetURL := "http://" + s.shards.Addrs[shard] + r.RequestURI
+	fmt.Fprintf(w, "redirecting from shard %d to shard %d (%q)\n", s.shards.CurIdx, shard, targetURL)
 
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(r.Method, targetURL, nil)
 	if err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "Error building redirect request: %v", err)
+		return
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
 		fmt.Fprintf(w, "Error redirecting the request: %v", err)
 		return
 	}
@@ -50,6 +62,10 @@ type GetResponse struct {
 
 // GetHandler handles read requests from the database.
 func (s *Server) GetHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
 	r.ParseForm()
 	key := r.Form.Get("key")
 
@@ -83,6 +99,10 @@ type SetResponse struct {
 
 // SetHandler handles write requests from the database.
 func (s *Server) SetHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+
 	r.ParseForm()
 	key := r.Form.Get("key")
 	value := r.Form.Get("value")
@@ -115,6 +135,10 @@ type DelResponse struct {
 
 // DelHandler handles delete requests from the database.
 func (s *Server) DelHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+
 	r.ParseForm()
 	key := r.Form.Get("key")
 
@@ -140,6 +164,10 @@ func (s *Server) DelHandler(w http.ResponseWriter, r *http.Request) {
 
 // DeleteExtraKeysHandler deletes keys that don't belong to the current shard.
 func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+
 	fmt.Fprintf(w, "Error = %v", s.db.DeleteExtraKeys(func(key string) bool {
 		return s.shards.Index(key) != s.shards.CurIdx
 	}))
@@ -147,6 +175,10 @@ func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) 
 
 // GetNextKeyForReplication returns the next key for replication.
 func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
 	enc := json.NewEncoder(w)
 	event, present, err := s.db.GetNextKeyForReplication()
 	res := replication.NextKeyValue{
@@ -163,6 +195,10 @@ func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request
 
 // DeleteReplicationKey deletes the key from replica queue.
 func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodDelete) {
+		return
+	}
+
 	r.ParseForm()
 
 	key := r.Form.Get("key")
@@ -186,4 +222,13 @@ func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "ok")
+}
+
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+	w.Header().Set("Allow", method)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	return false
 }

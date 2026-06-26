@@ -97,6 +97,20 @@ OK
 
 In distributed mode, keys are automatically routed to the correct shard based on static FNV hash modulo sharding, so you can connect to any shard and the system will handle routing transparently.
 
+## Current Contract and Guarantees
+
+This project targets a Redis-compatible string key-value subset with durable local storage and statically sharded cluster routing.
+
+Current guarantees:
+
+*   Supported commands are `PING`, `SET`, `GET`, and `DEL`.
+*   Shard ownership is deterministic: `fnv64(key) % shardCount`.
+*   Writes are accepted by the shard master that owns the key.
+*   Master writes are persisted to local BoltDB before success is returned.
+*   Replication is asynchronous, so replicas may lag behind masters.
+*   Replica writes are rejected through the Redis command path.
+*   The system does not yet provide automatic failover, leader election, strong consistency, online resharding, authentication, or TLS.
+
 ## Project Structure
 
 ```
@@ -129,7 +143,7 @@ In distributed mode, keys are automatically routed to the correct shard based on
 ### Key Components
 
 *   **`cmd/main.go`**: Enhanced entry point supporting both single-node and distributed modes
-*   **`internal/config`**: Handles TOML configuration parsing and consistent hashing for sharding
+*   **`internal/config`**: Handles TOML configuration parsing and static FNV modulo sharding
 *   **`internal/db`**: BoltDB-based persistence layer for data durability
 *   **`internal/replication`**: Implements master-replica synchronization for high availability
 *   **`internal/server`**: Enhanced server with automatic request routing between shards
@@ -139,6 +153,50 @@ In distributed mode, keys are automatically routed to the correct shard based on
 *   **`sharding.toml`**: Configuration file defining cluster topology and shard assignments
 *   **`launch.sh`**: Convenient script to start the entire distributed cluster
 *   **`.gitignore`**: Git ignore file excluding database files and build artifacts
+
+## Production Readiness Backlog
+
+This project is currently a learning/demo distributed key-value store. The backlog below tracks the major work needed before it could be considered production-ready.
+
+### P0: Correctness and Safety
+
+- [x] Define the production contract: Redis-compatible cache, durable KV, or strongly consistent KV.
+- [ ] Replace the RESP parser with a robust incremental parser that supports partial reads, pipelining, malformed inputs, and max payload limits.
+- [x] Add initial RESP read/write deadlines, HTTP server timeouts, and internal HTTP client timeouts.
+- [ ] Add context propagation, cancellation, and broader bounded request handling.
+- [x] Stop using HTTP GET for mutations; use proper write methods or a dedicated internal RPC protocol.
+- [ ] Replace one-key polling replication with an ordered write log, offsets, acknowledgements, retries, replay, and persistent replica progress.
+- [ ] Define durability guarantees for BoltDB transactions, fsync behavior, crash recovery, and partially replicated writes.
+- [ ] Add authentication and TLS for both client traffic and node-to-node traffic.
+- [ ] Add health and readiness endpoints for shard ownership, DB status, and replication status.
+- [ ] Add structured logging and metrics for command latency, errors, QPS, replication lag, queue depth, DB writes, routing failures, and active connections.
+- [ ] Add integration tests for multi-node routing, persistence after restart, replica catch-up, delete propagation, empty values, concurrent clients, and node restarts.
+
+### P1: Availability and Distributed Behavior
+
+- [ ] Add leader election or explicit failover with fencing to prevent split-brain writes.
+- [ ] Introduce cluster membership with node IDs, roles, shard ownership, and versioned cluster metadata.
+- [ ] Replace `hash % shardCount` with consistent hashing or slot-based sharding.
+- [ ] Implement resharding, shard migration, ownership handoff, and cleanup of moved keys.
+- [ ] Add write fencing so old masters cannot keep accepting writes after failover or ownership changes.
+- [ ] Add backpressure and resource limits for connections, command size, value size, queues, memory, and overload behavior.
+- [ ] Define replica read policy: leader-only, stale replica reads, or bounded-staleness reads.
+- [ ] Add backup, restore, and backup verification procedures.
+- [ ] Add graceful shutdown that drains active requests and stops replication cleanly.
+- [ ] Add operational packaging such as Docker, config validation, Kubernetes/systemd examples, documented ports, volumes, and upgrade steps.
+
+### P2: Performance and Compatibility
+
+- [ ] Add benchmarks and profiling for RESP parsing, GET/SET/DEL, routing, BoltDB writes, replication throughput, and concurrent clients.
+- [ ] Batch or stream replication instead of polling one key at a time.
+- [ ] Add internal connection pooling for routed commands and replication.
+- [ ] Decide Redis compatibility scope and improve command behavior, including `DEL` integer replies, multi-key behavior, TTLs, and command metadata.
+- [ ] Add expiration support with active/passive expiration and replicated TTL state.
+- [ ] Decide whether the data model stays string-only or expands to hashes, lists, sets, and other Redis types.
+- [ ] Add admin APIs for cluster state, replication status, shard ownership, and node draining.
+- [ ] Add chaos testing for process kills, network partitions, slow disks, delayed replication, corrupt DB files, partial writes, clock changes, and restart loops.
+- [ ] Add security hardening: input validation, rate limiting, audit logs, secret management, and secure defaults.
+- [ ] Document architecture, guarantees, configuration, failure modes, runbooks, backup/restore, and known limitations.
 
 ## Acknowledgements
 

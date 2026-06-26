@@ -36,7 +36,7 @@ func TestGetHandlerDistinguishesEmptyValueFromMissingKey(t *testing.T) {
 	server, closeDB := newWebTestServer(t)
 	defer closeDB()
 
-	req := httptest.NewRequest(http.MethodGet, "/set?key=empty&value=", nil)
+	req := httptest.NewRequest(http.MethodPost, "/set?key=empty&value=", nil)
 	rec := httptest.NewRecorder()
 	server.SetHandler(rec, req)
 	if rec.Code != http.StatusOK {
@@ -71,18 +71,18 @@ func TestReplicationHandlerReportsDeleteEvents(t *testing.T) {
 	server, closeDB := newWebTestServer(t)
 	defer closeDB()
 
-	req := httptest.NewRequest(http.MethodGet, "/set?key=key&value=value", nil)
+	req := httptest.NewRequest(http.MethodPost, "/set?key=key&value=value", nil)
 	rec := httptest.NewRecorder()
 	server.SetHandler(rec, req)
 
-	req = httptest.NewRequest(http.MethodGet, "/delete-replication-key?key=key&value=value", nil)
+	req = httptest.NewRequest(http.MethodDelete, "/delete-replication-key?key=key&value=value", nil)
 	rec = httptest.NewRecorder()
 	server.DeleteReplicationKey(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DeleteReplicationKey() for set status = %d, body = %q", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/del?key=key", nil)
+	req = httptest.NewRequest(http.MethodDelete, "/del?key=key", nil)
 	rec = httptest.NewRecorder()
 	server.DelHandler(rec, req)
 	if rec.Code != http.StatusOK {
@@ -99,5 +99,61 @@ func TestReplicationHandlerReportsDeleteEvents(t *testing.T) {
 	}
 	if !event.Present || !event.Deleted || event.Key != "key" || event.Value != "" || event.Error != "" {
 		t.Fatalf("unexpected delete replication event: %+v", event)
+	}
+}
+
+func TestMutationHandlersRejectWrongMethods(t *testing.T) {
+	server, closeDB := newWebTestServer(t)
+	defer closeDB()
+
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		method  string
+		path    string
+		allow   string
+	}{
+		{
+			name:    "set requires post",
+			handler: server.SetHandler,
+			method:  http.MethodGet,
+			path:    "/set?key=key&value=value",
+			allow:   http.MethodPost,
+		},
+		{
+			name:    "del requires delete",
+			handler: server.DelHandler,
+			method:  http.MethodGet,
+			path:    "/del?key=key",
+			allow:   http.MethodDelete,
+		},
+		{
+			name:    "replication ack requires delete",
+			handler: server.DeleteReplicationKey,
+			method:  http.MethodGet,
+			path:    "/delete-replication-key?key=key&value=value",
+			allow:   http.MethodDelete,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			tt.handler(rec, req)
+
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+			}
+			if got := rec.Header().Get("Allow"); got != tt.allow {
+				t.Fatalf("Allow = %q, want %q", got, tt.allow)
+			}
+		})
+	}
+}
+
+func TestInternalHTTPClientHasTimeout(t *testing.T) {
+	if httpClient.Timeout != internalHTTPTimeout {
+		t.Fatalf("httpClient.Timeout = %v, want %v", httpClient.Timeout, internalHTTPTimeout)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"time"
 
 	"redis-go/internal/config"
 	"redis-go/internal/db"
@@ -12,6 +13,13 @@ import (
 	"redis-go/internal/server"
 	"redis-go/internal/store"
 	"redis-go/internal/web"
+)
+
+const (
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 10 * time.Second
+	httpWriteTimeout      = 10 * time.Second
+	httpIdleTimeout       = 2 * time.Minute
 )
 
 var (
@@ -118,7 +126,7 @@ func startDistributedNode() {
 
 	go func() {
 		log.Printf("HTTP server listening on %s", *httpAddr)
-		log.Fatal(http.ListenAndServe(*httpAddr, nil))
+		log.Fatal(newHTTPServer(*httpAddr, http.DefaultServeMux).ListenAndServe())
 	}()
 
 	// Start Redis RESP server
@@ -138,5 +146,16 @@ func startDistributedNode() {
 
 		log.Println("client connected")
 		go server.HandleConnection(c, kv, shards)
+	}
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 }

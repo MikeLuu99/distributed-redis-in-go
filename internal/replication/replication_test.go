@@ -34,6 +34,9 @@ func TestClientLoopAppliesDeleteEventToReplica(t *testing.T) {
 			case "/next-replication-key":
 				return response(`{"key":"key","value":"","deleted":true,"present":true}`), nil
 			case "/delete-replication-key":
+				if r.Method != http.MethodDelete {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodDelete)
+				}
 				if r.URL.Query().Get("key") != "key" || r.URL.Query().Get("deleted") != "true" {
 					t.Fatalf("unexpected delete acknowledgement query: %s", r.URL.RawQuery)
 				}
@@ -66,6 +69,12 @@ func TestClientLoopAppliesDeleteEventToReplica(t *testing.T) {
 	}
 	if value != nil {
 		t.Fatalf("expected replica key to be deleted, got %q", string(value))
+	}
+}
+
+func TestHTTPClientHasTimeout(t *testing.T) {
+	if httpClient.Timeout != internalHTTPTimeout {
+		t.Fatalf("httpClient.Timeout = %v, want %v", httpClient.Timeout, internalHTTPTimeout)
 	}
 }
 

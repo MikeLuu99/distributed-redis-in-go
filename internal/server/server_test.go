@@ -17,15 +17,19 @@ import (
 
 type writeOnlyConn struct {
 	bytes.Buffer
+	writeDeadline time.Time
 }
 
-func (c *writeOnlyConn) Read(_ []byte) (int, error)         { return 0, nil }
-func (c *writeOnlyConn) Close() error                       { return nil }
-func (c *writeOnlyConn) LocalAddr() net.Addr                { return dummyAddr("local") }
-func (c *writeOnlyConn) RemoteAddr() net.Addr               { return dummyAddr("remote") }
-func (c *writeOnlyConn) SetDeadline(_ time.Time) error      { return nil }
-func (c *writeOnlyConn) SetReadDeadline(_ time.Time) error  { return nil }
-func (c *writeOnlyConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (c *writeOnlyConn) Read(_ []byte) (int, error)        { return 0, nil }
+func (c *writeOnlyConn) Close() error                      { return nil }
+func (c *writeOnlyConn) LocalAddr() net.Addr               { return dummyAddr("local") }
+func (c *writeOnlyConn) RemoteAddr() net.Addr              { return dummyAddr("remote") }
+func (c *writeOnlyConn) SetDeadline(_ time.Time) error     { return nil }
+func (c *writeOnlyConn) SetReadDeadline(_ time.Time) error { return nil }
+func (c *writeOnlyConn) SetWriteDeadline(t time.Time) error {
+	c.writeDeadline = t
+	return nil
+}
 
 type dummyAddr string
 
@@ -50,6 +54,9 @@ func TestRouteToShardPreservesEmptyStringValue(t *testing.T) {
 	previousClient := httpClient
 	httpClient = &http.Client{
 		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+			}
 			if r.URL.String() != "http://shard-1/get?key=key" {
 				t.Fatalf("unexpected routed URL: %s", r.URL.String())
 			}
@@ -76,6 +83,93 @@ func TestRouteToShardPreservesEmptyStringValue(t *testing.T) {
 	}
 	if got, want := conn.String(), "$0\r\n\r\n"; got != want {
 		t.Fatalf("routeToShard() response = %q, want %q", got, want)
+	}
+}
+
+func TestRouteToShardUsesWriteMethodsForMutations(t *testing.T) {
+	tests := []struct {
+		name     string
+		command  string
+		value    string
+		method   string
+		path     string
+		response string
+		wantRESP string
+	}{
+		{
+			name:     "set",
+			command:  "SET",
+			value:    "value",
+			method:   http.MethodPost,
+			path:     "/set",
+			response: `{"success":true}`,
+			wantRESP: "+OK\r\n",
+		},
+		{
+			name:     "del",
+			command:  "DEL",
+			method:   http.MethodDelete,
+			path:     "/del",
+			response: `{"success":true}`,
+			wantRESP: "+OK\r\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			previousClient := httpClient
+			httpClient = &http.Client{
+				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					if r.Method != tt.method {
+						t.Fatalf("method = %s, want %s", r.Method, tt.method)
+					}
+					if r.URL.Path != tt.path {
+						t.Fatalf("path = %s, want %s", r.URL.Path, tt.path)
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(tt.response)),
+						Header:     make(http.Header),
+					}, nil
+				}),
+			}
+			defer func() {
+				httpClient = previousClient
+			}()
+
+			shards := &config.Shards{
+				Count:  2,
+				CurIdx: 0,
+				Addrs:  map[int]string{1: "shard-1"},
+			}
+			conn := &writeOnlyConn{}
+
+			if err := routeToShard(conn, shards, 1, tt.command, "key", tt.value); err != nil {
+				t.Fatalf("routeToShard() error = %v", err)
+			}
+			if got := conn.String(); got != tt.wantRESP {
+				t.Fatalf("routeToShard() response = %q, want %q", got, tt.wantRESP)
+			}
+		})
+	}
+}
+
+func TestInternalHTTPClientHasTimeout(t *testing.T) {
+	if httpClient.Timeout != internalHTTPTimeout {
+		t.Fatalf("httpClient.Timeout = %v, want %v", httpClient.Timeout, internalHTTPTimeout)
+	}
+}
+
+func TestWriteRESPSetsWriteDeadline(t *testing.T) {
+	conn := &writeOnlyConn{}
+
+	writeRESP(conn, "+OK\r\n")
+
+	if conn.writeDeadline.IsZero() {
+		t.Fatal("expected write deadline to be set")
+	}
+	if got, want := conn.String(), "+OK\r\n"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
 	}
 }
 
