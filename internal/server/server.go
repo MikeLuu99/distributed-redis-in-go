@@ -16,6 +16,7 @@ import (
 
 // Response structures for JSON parsing
 type GetResponse struct {
+	Found bool   `json:"found"`
 	Value string `json:"value"`
 	Error string `json:"error,omitempty"`
 }
@@ -29,6 +30,8 @@ type DelResponse struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
 }
+
+var httpClient = http.DefaultClient
 
 func HandleConnection(connection net.Conn, kv *store.KeyValueStore, shards *config.Shards) {
 	defer connection.Close()
@@ -71,7 +74,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 		if len(array) >= 3 && array[1].Type == resp.RESPBulkString && array[2].Type == resp.RESPBulkString {
 			key := array[1].String
 			value := array[2].String
-			
+
 			// Check if we need to route this to another shard
 			if shards != nil {
 				shard := shards.Index(key)
@@ -82,8 +85,11 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 					return
 				}
 			}
-			
-			kv.Set(key, value)
+
+			if err := kv.Set(key, value); err != nil {
+				conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", err)))
+				return
+			}
 			conn.Write([]byte("+OK\r\n"))
 		} else {
 			conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
@@ -91,7 +97,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 	case "GET":
 		if len(array) >= 2 && array[1].Type == resp.RESPBulkString {
 			key := array[1].String
-			
+
 			// Check if we need to route this to another shard
 			if shards != nil {
 				shard := shards.Index(key)
@@ -102,8 +108,13 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 					return
 				}
 			}
-			
-			if value, exists := kv.Get(key); exists {
+
+			value, exists, err := kv.Get(key)
+			if err != nil {
+				conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", err)))
+				return
+			}
+			if exists {
 				response := fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)
 				conn.Write([]byte(response))
 			} else {
@@ -115,7 +126,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 	case "DEL":
 		if len(array) >= 2 && array[1].Type == resp.RESPBulkString {
 			key := array[1].String
-			
+
 			// Check if we need to route this to another shard
 			if shards != nil {
 				shard := shards.Index(key)
@@ -126,8 +137,11 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 					return
 				}
 			}
-			
-			kv.Del(key)
+
+			if _, err := kv.Del(key); err != nil {
+				conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", err)))
+				return
+			}
 			conn.Write([]byte("+OK\r\n"))
 		} else {
 			conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
@@ -142,7 +156,7 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 // routeToShard routes a command to the appropriate shard via HTTP
 func routeToShard(conn net.Conn, shards *config.Shards, shard int, cmd, key, value string) error {
 	addr := shards.Addrs[shard]
-	
+
 	var httpURL string
 	switch cmd {
 	case "SET":
@@ -161,13 +175,13 @@ func routeToShard(conn net.Conn, shards *config.Shards, shard int, cmd, key, val
 	default:
 		return fmt.Errorf("unsupported command for routing: %s", cmd)
 	}
-	
-	resp, err := http.Get(httpURL)
+
+	resp, err := httpClient.Get(httpURL)
 	if err != nil {
 		return fmt.Errorf("failed to route to shard %d: %v", shard, err)
 	}
 	defer resp.Body.Close()
-	
+
 	// Parse JSON response and convert to RESP format
 	switch cmd {
 	case "GET":
@@ -175,40 +189,40 @@ func routeToShard(conn net.Conn, shards *config.Shards, shard int, cmd, key, val
 		if err := json.NewDecoder(resp.Body).Decode(&getResp); err != nil {
 			return fmt.Errorf("failed to parse GET response: %v", err)
 		}
-		
+
 		if getResp.Error != "" {
 			conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", getResp.Error)))
-		} else if getResp.Value == "" {
+		} else if !getResp.Found {
 			conn.Write([]byte("$-1\r\n"))
 		} else {
 			response := fmt.Sprintf("$%d\r\n%s\r\n", len(getResp.Value), getResp.Value)
 			conn.Write([]byte(response))
 		}
-		
+
 	case "SET":
 		var setResp SetResponse
 		if err := json.NewDecoder(resp.Body).Decode(&setResp); err != nil {
 			return fmt.Errorf("failed to parse SET response: %v", err)
 		}
-		
+
 		if setResp.Success {
 			conn.Write([]byte("+OK\r\n"))
 		} else {
 			conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", setResp.Error)))
 		}
-		
+
 	case "DEL":
 		var delResp DelResponse
 		if err := json.NewDecoder(resp.Body).Decode(&delResp); err != nil {
 			return fmt.Errorf("failed to parse DEL response: %v", err)
 		}
-		
+
 		if delResp.Success {
 			conn.Write([]byte("+OK\r\n"))
 		} else {
 			conn.Write([]byte(fmt.Sprintf("-ERR %s\r\n", delResp.Error)))
 		}
 	}
-	
+
 	return nil
 }

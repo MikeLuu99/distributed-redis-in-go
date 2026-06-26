@@ -26,53 +26,60 @@ func NewKeyValueStoreWithDB(database *db.Database) *KeyValueStore {
 	}
 }
 
-func (kv *KeyValueStore) Set(key, value string) {
+func (kv *KeyValueStore) Set(key, value string) error {
+	if kv.db != nil {
+		if err := kv.db.SetKey(key, []byte(value)); err != nil {
+			return err
+		}
+	}
+
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	kv.data[key] = value
-	
-	// Persist to database if available
-	if kv.db != nil {
-		kv.db.SetKey(key, []byte(value))
-	}
+
+	return nil
 }
 
-func (kv *KeyValueStore) Get(key string) (string, bool) {
+func (kv *KeyValueStore) Get(key string) (string, bool, error) {
 	kv.mu.RLock()
-	defer kv.mu.RUnlock()
-	
-	// First check in-memory cache
 	if value, exists := kv.data[key]; exists {
-		return value, exists
+		kv.mu.RUnlock()
+		return value, true, nil
 	}
-	
-	// If not in memory and we have a database, check there
+	kv.mu.RUnlock()
+
 	if kv.db != nil {
-		if value, err := kv.db.GetKey(key); err == nil && value != nil {
-			// Cache the value in memory for future reads
+		value, err := kv.db.GetKey(key)
+		if err != nil {
+			return "", false, err
+		}
+		if value != nil {
+			kv.mu.Lock()
 			kv.data[key] = string(value)
-			return string(value), true
+			kv.mu.Unlock()
+			return string(value), true, nil
 		}
 	}
-	
-	return "", false
+
+	return "", false, nil
 }
 
-func (kv *KeyValueStore) Del(key string) bool {
+func (kv *KeyValueStore) Del(key string) (bool, error) {
+	var dbExisted bool
+	if kv.db != nil {
+		existed, err := kv.db.DelKey(key)
+		if err != nil {
+			return false, err
+		}
+		dbExisted = existed
+	}
+
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	
-	existed := false
 	if _, exists := kv.data[key]; exists {
 		delete(kv.data, key)
-		existed = true
+		return true, nil
 	}
-	
-	// Delete from database if available
-	if kv.db != nil {
-		kv.db.DelKey(key)
-		existed = true // Consider it existed if it was in the database
-	}
-	
-	return existed
+
+	return dbExisted, nil
 }

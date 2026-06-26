@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -10,6 +11,18 @@ import (
 
 var defaultBucket = []byte("default")
 var replicaBucket = []byte("replication")
+
+type replicationRecord struct {
+	Op    string `json:"op"`
+	Value string `json:"value,omitempty"`
+}
+
+// ReplicationEvent describes a pending change for replicas.
+type ReplicationEvent struct {
+	Key     string
+	Value   string
+	Deleted bool
+}
 
 // Database is an open bolt database.
 type Database struct {
@@ -53,12 +66,20 @@ func (d *Database) SetKey(key string, value []byte) error {
 		return errors.New("read-only mode")
 	}
 
+	record, err := encodeReplicationRecord(replicationRecord{
+		Op:    "set",
+		Value: string(value),
+	})
+	if err != nil {
+		return err
+	}
+
 	return d.db.Update(func(tx *bolt.Tx) error {
 		if err := tx.Bucket(defaultBucket).Put([]byte(key), value); err != nil {
 			return err
 		}
 
-		return tx.Bucket(replicaBucket).Put([]byte(key), value)
+		return tx.Bucket(replicaBucket).Put([]byte(key), record)
 	})
 }
 
@@ -80,41 +101,65 @@ func copyByteSlice(b []byte) []byte {
 	return res
 }
 
-// GetNextKeyForReplication returns the key and value for the keys that have
-// changed and have not yet been applied to replicas.
-// If there are no new keys, nil key and value will be returned.
-func (d *Database) GetNextKeyForReplication() (key, value []byte, err error) {
+// GetNextKeyForReplication returns the next pending change for replicas.
+// If there are no pending changes, present will be false.
+func (d *Database) GetNextKeyForReplication() (event ReplicationEvent, present bool, err error) {
 	err = d.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(replicaBucket)
 		k, v := b.Cursor().First()
-		key = copyByteSlice(k)
-		value = copyByteSlice(v)
+		if k == nil {
+			return nil
+		}
+
+		record, err := decodeReplicationRecord(copyByteSlice(v))
+		if err != nil {
+			return err
+		}
+
+		event = ReplicationEvent{
+			Key:     string(k),
+			Value:   record.Value,
+			Deleted: record.Op == "del",
+		}
+		present = true
 		return nil
 	})
 
 	if err != nil {
-		return nil, nil, err
+		return ReplicationEvent{}, false, err
 	}
 
-	return key, value, nil
+	return event, present, nil
 }
 
-// DeleteReplicationKey deletes the key from the replication queue
-// if the value matches the contents or if the key is already absent.
-func (d *Database) DeleteReplicationKey(key, value []byte) (err error) {
+// DeleteReplicationKey deletes the key from the replication queue if the
+// operation and value still match the pending change.
+func (d *Database) DeleteReplicationKey(key string, value string, deleted bool) (err error) {
+	op := "set"
+	if deleted {
+		op = "del"
+	}
+	record, err := encodeReplicationRecord(replicationRecord{
+		Op:    op,
+		Value: value,
+	})
+	if err != nil {
+		return err
+	}
+
 	return d.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(replicaBucket)
 
-		v := b.Get(key)
+		v := b.Get([]byte(key))
 		if v == nil {
 			return errors.New("key does not exist")
 		}
 
-		if !bytes.Equal(v, value) {
+		if !bytes.Equal(v, record) {
 			return errors.New("value does not match")
 		}
 
-		return b.Delete(key)
+		return b.Delete([]byte(key))
 	})
 }
 
@@ -134,18 +179,28 @@ func (d *Database) GetKey(key string) ([]byte, error) {
 }
 
 // DelKey deletes the key from the database.
-func (d *Database) DelKey(key string) error {
+func (d *Database) DelKey(key string) (bool, error) {
 	if d.readOnly {
-		return errors.New("read-only mode")
+		return false, errors.New("read-only mode")
 	}
 
-	return d.db.Update(func(tx *bolt.Tx) error {
-		if err := tx.Bucket(defaultBucket).Delete([]byte(key)); err != nil {
+	record, err := encodeReplicationRecord(replicationRecord{Op: "del"})
+	if err != nil {
+		return false, err
+	}
+
+	existed := false
+	err = d.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(defaultBucket)
+		if b.Get([]byte(key)) != nil {
+			existed = true
+		}
+		if err := b.Delete([]byte(key)); err != nil {
 			return err
 		}
-		// Also add to replication queue for deletion
-		return tx.Bucket(replicaBucket).Put([]byte(key), []byte(""))
+		return tx.Bucket(replicaBucket).Put([]byte(key), record)
 	})
+	return existed, err
 }
 
 // DeleteExtraKeys deletes the keys that do not belong to this shard.
@@ -177,4 +232,25 @@ func (d *Database) DeleteExtraKeys(isExtra func(string) bool) error {
 		}
 		return nil
 	})
+}
+
+func (d *Database) DelKeyOnReplica(key string) error {
+	return d.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(defaultBucket).Delete([]byte(key))
+	})
+}
+
+func encodeReplicationRecord(record replicationRecord) ([]byte, error) {
+	return json.Marshal(record)
+}
+
+func decodeReplicationRecord(data []byte) (replicationRecord, error) {
+	var record replicationRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return replicationRecord{}, err
+	}
+	if record.Op != "set" && record.Op != "del" {
+		return replicationRecord{}, fmt.Errorf("unknown replication operation %q", record.Op)
+	}
+	return record, nil
 }

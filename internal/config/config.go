@@ -34,9 +34,10 @@ func ParseFile(filename string) (Config, error) {
 // the sharding config: the shards count, current index and
 // the addresses of all other shards too.
 type Shards struct {
-	Count  int
-	CurIdx int
-	Addrs  map[int]string
+	Count      int
+	CurIdx     int
+	Addrs      map[int]string
+	ReplicaMap map[int][]string
 }
 
 // ParseShards converts and verifies the list of shards
@@ -46,6 +47,7 @@ func ParseShards(shards []Shard, curShardName string) (*Shards, error) {
 	shardCount := len(shards)
 	shardIdx := -1
 	addrs := make(map[int]string)
+	replicaMap := make(map[int][]string)
 
 	for _, s := range shards {
 		if _, ok := addrs[s.Idx]; ok {
@@ -53,6 +55,7 @@ func ParseShards(shards []Shard, curShardName string) (*Shards, error) {
 		}
 
 		addrs[s.Idx] = s.Address
+		replicaMap[s.Idx] = append([]string(nil), s.Replicas...)
 		if s.Name == curShardName {
 			shardIdx = s.Idx
 		}
@@ -69,9 +72,10 @@ func ParseShards(shards []Shard, curShardName string) (*Shards, error) {
 	}
 
 	return &Shards{
-		Addrs:  addrs,
-		Count:  shardCount,
-		CurIdx: shardIdx,
+		Addrs:      addrs,
+		Count:      shardCount,
+		CurIdx:     shardIdx,
+		ReplicaMap: replicaMap,
 	}, nil
 }
 
@@ -80,4 +84,14 @@ func (s *Shards) Index(key string) int {
 	h := fnv.New64()
 	h.Write([]byte(key))
 	return int(h.Sum64() % uint64(s.Count))
+}
+
+// IsReplicaAddr reports whether addr is configured as a replica for shard.
+func (s *Shards) IsReplicaAddr(shard int, addr string) bool {
+	for _, replicaAddr := range s.ReplicaMap[shard] {
+		if replicaAddr == addr {
+			return true
+		}
+	}
+	return false
 }

@@ -42,7 +42,7 @@ func main() {
 
 func startSingleNode() {
 	log.Println("Starting in single-node mode...")
-	
+
 	listener, err := net.Listen("tcp", *redisAddr)
 	if err != nil {
 		log.Fatal("error listening:", err)
@@ -100,6 +100,9 @@ func startDistributedNode() {
 		leaderAddr, ok := shards.Addrs[shards.CurIdx]
 		if !ok {
 			log.Fatalf("Could not find address for leader for shard %d", shards.CurIdx)
+		}
+		if !shards.IsReplicaAddr(shards.CurIdx, *httpAddr) {
+			log.Fatalf("HTTP address %q is not configured as a replica for shard %q", *httpAddr, *shard)
 		}
 		go replication.ClientLoop(database, leaderAddr)
 	}

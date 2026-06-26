@@ -14,7 +14,7 @@ A simple Redis-like server implemented in Go from scratch with distributed capab
     *   `DEL`
 
 ### Distributed Mode
-*   **Sharding**: Consistent hash-based key distribution across multiple nodes
+*   **Sharding**: Static FNV hash modulo key distribution across multiple nodes
 *   **Replication**: Master-replica setup with automatic synchronization
 *   **Persistence**: [BoltDB](https://github.com/etcd-io/bbolt)-based storage for data durability
 *   **Cluster Communication**: HTTP-based inter-node communication
@@ -95,7 +95,7 @@ OK
 (nil)
 ```
 
-In distributed mode, keys are automatically routed to the correct shard based on consistent hashing, so you can connect to any shard and the system will handle routing transparently.
+In distributed mode, keys are automatically routed to the correct shard based on static FNV hash modulo sharding, so you can connect to any shard and the system will handle routing transparently.
 
 ## Project Structure
 

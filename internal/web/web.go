@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"redis-go/internal/config"
 	"redis-go/internal/db"
@@ -42,6 +43,7 @@ func (s *Server) redirect(shard int, w http.ResponseWriter, r *http.Request) {
 
 // GetResponse represents the JSON response for GET operations
 type GetResponse struct {
+	Found bool   `json:"found"`
 	Value string `json:"value"`
 	Error string `json:"error,omitempty"`
 }
@@ -59,11 +61,12 @@ func (s *Server) GetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	value, err := s.db.GetKey(key)
-	
+
 	response := GetResponse{
+		Found: value != nil,
 		Value: string(value),
 	}
-	
+
 	if err != nil {
 		response.Error = err.Error()
 	}
@@ -91,11 +94,11 @@ func (s *Server) SetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err := s.db.SetKey(key, []byte(value))
-	
+
 	response := SetResponse{
 		Success: err == nil,
 	}
-	
+
 	if err != nil {
 		response.Error = err.Error()
 	}
@@ -121,12 +124,12 @@ func (s *Server) DelHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.db.DelKey(key)
-	
+	_, err := s.db.DelKey(key)
+
 	response := DelResponse{
 		Success: err == nil,
 	}
-	
+
 	if err != nil {
 		response.Error = err.Error()
 	}
@@ -145,12 +148,17 @@ func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) 
 // GetNextKeyForReplication returns the next key for replication.
 func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
-	k, v, err := s.db.GetNextKeyForReplication()
-	enc.Encode(&replication.NextKeyValue{
-		Key:   string(k),
-		Value: string(v),
-		Err:   err,
-	})
+	event, present, err := s.db.GetNextKeyForReplication()
+	res := replication.NextKeyValue{
+		Key:     event.Key,
+		Value:   event.Value,
+		Deleted: event.Deleted,
+		Present: present,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	enc.Encode(&res)
 }
 
 // DeleteReplicationKey deletes the key from replica queue.
@@ -159,8 +167,18 @@ func (s *Server) DeleteReplicationKey(w http.ResponseWriter, r *http.Request) {
 
 	key := r.Form.Get("key")
 	value := r.Form.Get("value")
+	deleted, err := strconv.ParseBool(r.Form.Get("deleted"))
+	if r.Form.Get("deleted") == "" {
+		deleted = false
+		err = nil
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, "error: %v", err)
+		return
+	}
 
-	err := s.db.DeleteReplicationKey([]byte(key), []byte(value))
+	err = s.db.DeleteReplicationKey(key, value, deleted)
 	if err != nil {
 		w.WriteHeader(http.StatusExpectationFailed)
 		fmt.Fprintf(w, "error: %v", err)
