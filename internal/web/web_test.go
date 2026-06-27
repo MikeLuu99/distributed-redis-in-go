@@ -238,3 +238,42 @@ func TestInternalAuthProtectsReadyAndDataHandlers(t *testing.T) {
 		t.Fatalf("HealthHandler() status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }
+
+func TestBackupHandlerRequiresAuthAndReturnsSnapshot(t *testing.T) {
+	database, closeDB, err := db.NewDatabase(t.TempDir()+"/test.db", false)
+	if err != nil {
+		t.Fatalf("NewDatabase() error = %v", err)
+	}
+	defer closeDB()
+
+	if err := database.SetKey("key", []byte("value")); err != nil {
+		t.Fatalf("SetKey() error = %v", err)
+	}
+
+	server := NewServerWithAuth(database, &config.Shards{
+		Count:  1,
+		CurIdx: 0,
+		Addrs:  map[int]string{0: "127.0.0.1:8080"},
+	}, "secret")
+
+	req := httptest.NewRequest(http.MethodGet, "/backup", nil)
+	rec := httptest.NewRecorder()
+	server.BackupHandler(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("BackupHandler() without auth status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/backup", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	server.BackupHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("BackupHandler() with auth status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("expected non-empty backup body")
+	}
+	if got, want := rec.Header().Get("Content-Type"), "application/octet-stream"; got != want {
+		t.Fatalf("Content-Type = %q, want %q", got, want)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	bolt "go.etcd.io/bbolt"
 
@@ -215,6 +216,13 @@ func (d *Database) ReplicationQueueDepth() (int, error) {
 		metrics.ReplicationQueueDepth.Set(int64(count))
 	}
 	return count, err
+}
+
+func (d *Database) BackupTo(w io.Writer) error {
+	return d.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(w)
+		return err
+	})
 }
 
 // DelKey deletes the key from the database.

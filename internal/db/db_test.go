@@ -1,6 +1,8 @@
 package db
 
 import (
+	"bytes"
+	"os"
 	"testing"
 )
 
@@ -190,5 +192,41 @@ func TestDatabasePersistsValuesAfterReopen(t *testing.T) {
 	}
 	if string(value) != "value" {
 		t.Fatalf("persisted value = %q, want value", string(value))
+	}
+}
+
+func TestBackupToProducesRestorableDatabase(t *testing.T) {
+	database, closeDB := newTestDatabase(t, false)
+	defer closeDB()
+
+	if err := database.SetKey("key", []byte("value")); err != nil {
+		t.Fatalf("SetKey() error = %v", err)
+	}
+
+	var backup bytes.Buffer
+	if err := database.BackupTo(&backup); err != nil {
+		t.Fatalf("BackupTo() error = %v", err)
+	}
+	if backup.Len() == 0 {
+		t.Fatal("expected non-empty backup")
+	}
+
+	backupPath := t.TempDir() + "/backup.db"
+	if err := os.WriteFile(backupPath, backup.Bytes(), 0600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	restored, closeRestored, err := NewDatabase(backupPath, false)
+	if err != nil {
+		t.Fatalf("NewDatabase(backup) error = %v", err)
+	}
+	defer closeRestored()
+
+	value, err := restored.GetKey("key")
+	if err != nil {
+		t.Fatalf("restored GetKey() error = %v", err)
+	}
+	if string(value) != "value" {
+		t.Fatalf("restored value = %q, want value", string(value))
 	}
 }

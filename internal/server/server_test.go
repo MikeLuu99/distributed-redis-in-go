@@ -361,6 +361,30 @@ func TestReplicaWriteReturnsErrorAndDoesNotMutateMemory(t *testing.T) {
 	}
 }
 
+func TestReadOnlyReplicaRejectsWritesBeforeRouting(t *testing.T) {
+	previousClient := httpClient
+	httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			t.Fatalf("replica write should not be routed: %s", r.URL.String())
+			return nil, nil
+		}),
+	}
+	defer func() {
+		httpClient = previousClient
+	}()
+
+	conn := &writeOnlyConn{}
+	executeCommandsWithOptions(conn, command("SET", "key", "value"), store.NewKeyValueStore(), &config.Shards{
+		Count:  2,
+		CurIdx: 1,
+		Addrs:  map[int]string{0: "shard-0", 1: "shard-1"},
+	}, Options{ReadOnly: true})
+
+	if got, want := conn.String(), "-ERR read-only replica\r\n"; got != want {
+		t.Fatalf("response = %q, want %q", got, want)
+	}
+}
+
 func TestLocalGetReturnsEmptyBulkStringForEmptyValue(t *testing.T) {
 	kv := store.NewKeyValueStore()
 

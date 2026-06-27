@@ -46,6 +46,7 @@ var internalAuthToken string
 
 type Options struct {
 	AuthToken string
+	ReadOnly  bool
 }
 
 func SetInternalAuthToken(token string) {
@@ -87,7 +88,7 @@ func HandleConnectionWithOptions(connection net.Conn, kv *store.KeyValueStore, s
 			continue
 		}
 
-		executeCommands(connection, commands, kv, shards)
+		executeCommandsWithOptions(connection, commands, kv, shards, opts)
 	}
 }
 
@@ -102,6 +103,10 @@ func isAuthCommand(commands resp.RESPValue, token string) bool {
 }
 
 func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueStore, shards *config.Shards) {
+	executeCommandsWithOptions(conn, commands, kv, shards, Options{})
+}
+
+func executeCommandsWithOptions(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueStore, shards *config.Shards, opts Options) {
 	if commands.Type != resp.RESPArray || len(commands.Array) == 0 {
 		return
 	}
@@ -120,6 +125,11 @@ func executeCommands(conn net.Conn, commands resp.RESPValue, kv *store.KeyValueS
 	cmdStr = strings.ToUpper(cmdStr)
 	metrics.AddCommand(cmdStr)
 	defer metrics.ObserveCommand(cmdStr, time.Now())
+	if opts.ReadOnly && (cmdStr == "SET" || cmdStr == "DEL") {
+		metrics.AddCommandError(cmdStr)
+		writeRESP(conn, "-ERR read-only replica\r\n")
+		return
+	}
 	switch cmdStr {
 	case "SET":
 		if len(array) >= 3 && array[1].Type == resp.RESPBulkString && array[2].Type == resp.RESPBulkString {

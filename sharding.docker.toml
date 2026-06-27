@@ -1,0 +1,23 @@
+[[shards]]
+name = "Hanoi"
+idx = 0
+address = "hanoi:8080"
+replicas = []
+
+[[shards]]
+name = "Sai Gon"
+idx = 1
+address = "sai-gon:8081"
+replicas = []
+
+[[shards]]
+name = "Da Nang"
+idx = 2
+address = "da-nang:8082"
+replicas = []
+
+[[shards]]
+name = "Thanh Hoa"
+idx = 3
+address = "thanh-hoa:8083"
+replicas = []

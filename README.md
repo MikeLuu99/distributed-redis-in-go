@@ -97,6 +97,56 @@ OK
 
 In distributed mode, keys are automatically routed to the correct shard based on static FNV hash modulo sharding, so you can connect to any shard and the system will handle routing transparently.
 
+### Docker Compose
+
+The Docker setup has been tested with OrbStack.
+
+1.  **Build and start the four-shard cluster:**
+    ```sh
+    docker compose up -d --build
+    ```
+
+2.  **Check container status:**
+    ```sh
+    docker compose ps
+    ```
+
+3.  **Check readiness:**
+    ```sh
+    curl -fsS http://127.0.0.1:8080/readyz
+    curl -fsS http://127.0.0.1:8081/readyz
+    curl -fsS http://127.0.0.1:8082/readyz
+    curl -fsS http://127.0.0.1:8083/readyz
+    ```
+
+4.  **Smoke-test Redis routing:**
+    ```sh
+    redis-cli -p 6380 PING
+    redis-cli -p 6380 SET docker:routing routed
+    redis-cli -p 6380 GET docker:routing
+    redis-cli -p 6381 GET docker:routing
+    redis-cli -p 6382 GET docker:routing
+    redis-cli -p 6383 GET docker:routing
+    ```
+
+5.  **Check backup and metrics endpoints:**
+    ```sh
+    curl -fsS http://127.0.0.1:8080/backup -o /tmp/redis-go-backup.db
+    curl -fsS http://127.0.0.1:8080/debug/vars
+    ```
+
+6.  **Stop the cluster:**
+    ```sh
+    docker compose down
+    ```
+
+    To also remove test data volumes:
+    ```sh
+    docker compose down -v
+    ```
+
+The compose topology uses `sharding.docker.toml`, where shard addresses point at Docker service names instead of `127.0.0.1`.
+
 ## Current Contract and Guarantees
 
 This project targets a Redis-compatible string key-value subset with durable local storage and statically sharded cluster routing.
@@ -126,7 +176,27 @@ Operational endpoints:
 
 *   `GET /healthz`: process liveness.
 *   `GET /readyz`: DB readiness, shard metadata, and replication queue depth.
+*   `GET /backup`: BoltDB snapshot backup. Requires internal auth when `-internal-auth-token` is set.
 *   `GET /debug/vars`: expvar metrics, including command counts, HTTP handler counts, routing failures, and replication counters.
+
+Replica read policy:
+
+*   Replicas are read-only.
+*   Replicas may serve stale reads for keys owned by their shard.
+*   Replicas reject all Redis write commands before shard routing.
+*   Use shard masters for writes and for read-after-write consistency.
+
+Backup and restore:
+
+*   Create a backup with `curl http://HOST:HTTP_PORT/backup -o shard.db`.
+*   If internal auth is enabled, pass `Authorization: Bearer TOKEN`.
+*   Restore by stopping the node, replacing its BoltDB file with the backup, and restarting the node.
+*   Verify restore with `/readyz` and representative `GET` commands.
+
+Operational packaging:
+
+*   `Dockerfile` builds the `redis-go` binary into a small Alpine runtime image.
+*   `docker-compose.yml` starts the four-shard local topology using `sharding.docker.toml`.
 
 ## Project Structure
 
@@ -151,7 +221,10 @@ Operational endpoints:
 │       └── web.go      # HTTP handlers for cluster communication
 ├── persistence/        # Database files directory (ignored by git)
 ├── sharding.toml       # Cluster configuration
+├── sharding.docker.toml # Docker Compose cluster configuration
 ├── launch.sh          # Multi-node deployment script
+├── Dockerfile          # Container image definition
+├── docker-compose.yml  # Four-shard local Docker topology
 ├── .gitignore         # Git ignore file
 ├── go.mod
 └── README.md
@@ -168,7 +241,10 @@ Operational endpoints:
 *   **`internal/web`**: HTTP handlers for inter-node communication and cluster management
 *   **`persistence/`**: Directory containing all BoltDB database files (ignored by git)
 *   **`sharding.toml`**: Configuration file defining cluster topology and shard assignments
+*   **`sharding.docker.toml`**: Docker Compose shard config using service DNS names
 *   **`launch.sh`**: Convenient script to start the entire distributed cluster
+*   **`Dockerfile`**: Multi-stage build for the `redis-go` container image
+*   **`docker-compose.yml`**: Local four-shard Docker topology with persistent volumes
 *   **`.gitignore`**: Git ignore file excluding database files and build artifacts
 
 ## Production Readiness Backlog
@@ -197,11 +273,13 @@ This project is currently a learning/demo distributed key-value store. The backl
 - [ ] Replace `hash % shardCount` with consistent hashing or slot-based sharding.
 - [ ] Implement resharding, shard migration, ownership handoff, and cleanup of moved keys.
 - [ ] Add write fencing so old masters cannot keep accepting writes after failover or ownership changes.
-- [ ] Add backpressure and resource limits for connections, command size, value size, queues, memory, and overload behavior.
-- [ ] Define replica read policy: leader-only, stale replica reads, or bounded-staleness reads.
-- [ ] Add backup, restore, and backup verification procedures.
-- [ ] Add graceful shutdown that drains active requests and stops replication cleanly.
-- [ ] Add operational packaging such as Docker, config validation, Kubernetes/systemd examples, documented ports, volumes, and upgrade steps.
+- [x] Add initial backpressure and resource limits for max connections, command arguments, line size, and bulk value size.
+- [ ] Add broader queue, memory, and overload policy limits.
+- [x] Define replica read policy: leader-only, stale replica reads, or bounded-staleness reads.
+- [x] Add backup, restore, and backup verification procedures.
+- [x] Add graceful shutdown that drains active requests and stops replication cleanly.
+- [x] Add Docker packaging, compose topology, config validation, documented ports, and volumes.
+- [ ] Add Kubernetes/systemd examples and rolling upgrade steps.
 
 ### P2: Performance and Compatibility
 

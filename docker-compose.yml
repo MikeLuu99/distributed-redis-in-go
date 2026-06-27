@@ -1,0 +1,62 @@
+services:
+  hanoi:
+    build: .
+    command:
+      - -db-location=/data/hanoi.db
+      - -http-addr=0.0.0.0:8080
+      - -redis-addr=0.0.0.0:6380
+      - -config-file=/app/sharding.docker.toml
+      - -shard=Hanoi
+    ports:
+      - "6380:6380"
+      - "8080:8080"
+    volumes:
+      - hanoi-data:/data
+
+  sai-gon:
+    build: .
+    command:
+      - -db-location=/data/sai-gon.db
+      - -http-addr=0.0.0.0:8081
+      - -redis-addr=0.0.0.0:6381
+      - -config-file=/app/sharding.docker.toml
+      - "-shard=Sai Gon"
+    ports:
+      - "6381:6381"
+      - "8081:8081"
+    volumes:
+      - sai-gon-data:/data
+
+  da-nang:
+    build: .
+    command:
+      - -db-location=/data/da-nang.db
+      - -http-addr=0.0.0.0:8082
+      - -redis-addr=0.0.0.0:6382
+      - -config-file=/app/sharding.docker.toml
+      - "-shard=Da Nang"
+    ports:
+      - "6382:6382"
+      - "8082:8082"
+    volumes:
+      - da-nang-data:/data
+
+  thanh-hoa:
+    build: .
+    command:
+      - -db-location=/data/thanh-hoa.db
+      - -http-addr=0.0.0.0:8083
+      - -redis-addr=0.0.0.0:6383
+      - -config-file=/app/sharding.docker.toml
+      - "-shard=Thanh Hoa"
+    ports:
+      - "6383:6383"
+      - "8083:8083"
+    volumes:
+      - thanh-hoa-data:/data
+
+volumes:
+  hanoi-data:
+  sai-gon-data:
+  da-nang-data:
+  thanh-hoa-data:

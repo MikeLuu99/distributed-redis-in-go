@@ -254,6 +254,22 @@ func (s *Server) DeleteExtraKeysHandler(w http.ResponseWriter, r *http.Request) 
 	}))
 }
 
+func (s *Server) BackupHandler(w http.ResponseWriter, r *http.Request) {
+	defer metrics.ObserveHTTPHandler("backup", time.Now())
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if !s.requireAuth(w, r) {
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="redis-go.bolt"`)
+	if err := s.db.BackupTo(w); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 // GetNextKeyForReplication returns the next key for replication.
 func (s *Server) GetNextKeyForReplication(w http.ResponseWriter, r *http.Request) {
 	defer metrics.ObserveHTTPHandler("next-replication-key", time.Now())
