@@ -296,4 +296,6 @@ This project is currently a learning/demo distributed key-value store. The backl
 
 ## Acknowledgements
 
-This project distributed mode was implemented by following this repo: https://github.com/YuriyNasretdinov/distribkv
+This project's initial foundation and codebase followed Yuri's tutorial on Distributed KV Database: 
+- https://www.youtube.com/watch?v=EdPkmJrtTWQ&list=PLWwSgbaBp9XrMkjEhmTIC37WX2JfwZp7I 
+- https://github.com/YuriyNasretdinov/distribkv
