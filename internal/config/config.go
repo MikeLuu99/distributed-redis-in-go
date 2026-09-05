@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
-	"hash/fnv"
+	"sync"
 
 	"github.com/BurntSushi/toml"
+
+	"redis-go/internal/ring"
 )
 
 // Shard describes a shard that holds the appropriate set of keys.
@@ -38,6 +40,9 @@ type Shards struct {
 	CurIdx     int
 	Addrs      map[int]string
 	ReplicaMap map[int][]string
+
+	mu   sync.RWMutex
+	ring *ring.Ring
 }
 
 // ParseShards converts and verifies the list of shards
@@ -79,11 +84,28 @@ func ParseShards(shards []Shard, curShardName string) (*Shards, error) {
 	}, nil
 }
 
-// Index returns the shard number for the corresponding key.
+// Index returns the shard number for the corresponding key
+// using consistent hashing: each shard occupies many virtual
+// positions on a hash ring, so adding or removing a shard only
+// remaps the small fraction of keys nearest to its positions
+// instead of nearly all keys as modulo hashing would.
 func (s *Shards) Index(key string) int {
-	h := fnv.New64()
-	h.Write([]byte(key))
-	return int(h.Sum64() % uint64(s.Count))
+	s.mu.RLock()
+	r := s.ring
+	s.mu.RUnlock()
+	if r == nil {
+		s.mu.Lock()
+		if s.ring == nil {
+			members := make([]int, s.Count)
+			for i := range members {
+				members[i] = i
+			}
+			s.ring = ring.New(ring.DefaultVnodes, members...)
+		}
+		r = s.ring
+		s.mu.Unlock()
+	}
+	return r.Get(key)
 }
 
 // IsReplicaAddr reports whether addr is configured as a replica for shard.
